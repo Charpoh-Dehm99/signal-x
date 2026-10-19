@@ -12,3 +12,8 @@ logs/
 
 # Local scratch
 i
+
+# Build artifacts
+build/
+dist/
+*.egg-info/

@@ -55,19 +55,38 @@ web app. The journal and capture data belong to the scripts.
 
 ## Installation
 
+### As a command (native tool install)
+
+```bash
+git clone https://github.com/Charpoh-Dehm99/signal-x.git
+cd signal-x
+pipx install .        # or: python3 -m pip install .
+signal-x              # dashboard on http://127.0.0.1:8000
+signal-x --port 9000  # any port
+```
+
+`signal-x` also takes `--host` and `--reload` (dev). On Termux, install
+`pkg install python git python-pyarrow` first (pyarrow has no Android wheel;
+the Termux package supplies it), then `pip install .`. If pip tries to compile
+`pydantic-core`, add `pkg install rust clang`.
+
+### From a checkout (development)
+
 ```bash
 git clone https://github.com/Charpoh-Dehm99/signal-x.git
 cd signal-x
 
 python3 -m venv .venv
 .venv/bin/pip install -U pip
-.venv/bin/pip install fastapi "uvicorn[standard]" httpx pandas numpy pyarrow websockets requests
+.venv/bin/pip install -r requirements.txt
 ```
 
 Development extras:
 
 ```bash
 .venv/bin/pip install pytest anyio
+# optional: full research-script deps (pandas/numpy/websockets/requests)
+.venv/bin/pip install -e ".[research]"
 # linters used during development (isolated):
 pipx run bandit -q -r signalx scripts app
 ```
@@ -75,6 +94,8 @@ pipx run bandit -q -r signalx scripts app
 ## Quick start
 
 ```bash
+signal-x
+# or from the checkout:
 .venv/bin/python -m uvicorn app.server:app --host 127.0.0.1 --port 8000
 ```
 
