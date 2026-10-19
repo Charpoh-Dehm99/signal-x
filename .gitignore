@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Generated data / runtime logs (never commit: huge parquet + journals)
+data/
+logs/
+
+# Local scratch
+i

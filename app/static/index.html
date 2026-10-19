@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#000000">
+<title>SIGNAL-X · charts</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand"><canvas id="logo" class="brand-logo" role="img" aria-label="SIGNAL-X — click to fire" title="SIGNAL-X — click to fire"></canvas></div>
+  <div class="top-right">
+    <span class="warn-pill" title="G0 full-universe rerun killed 2026-10-17: no validated edge. Charts and algorithm layers are observations, not trade signals.">observation only · G0 killed</span>
+    <button id="notify" class="sound-btn notify-btn" aria-label="Notifications" title="Notifications (n) — every alert that chimes lands here"></button>
+    <input id="vol" class="vol" type="range" min="0" max="100" step="1" aria-label="Alert volume" title="Alert volume — release for a preview chime">
+    <button id="sound" class="sound-btn" aria-label="Alert sounds" title="Alert sounds: EMA crosses and cascades on the chart, top 1% gainer entries, journal signals, hot/warn observation events"></button>
+    <span id="health" class="dot" title="API health"></span>
+  </div>
+</header>
+
+<div id="notify-panel" class="notify-panel" hidden>
+  <div class="notify-head"><b>Notifications</b><button id="notify-clear" type="button">clear all</button></div>
+  <div class="notify-tools">
+    <div class="notify-chips" id="notify-chips" role="group" aria-label="Filter notifications">
+      <button type="button" data-f="all" class="on">All</button>
+      <button type="button" data-f="ema">EMA</button>
+      <button type="button" data-f="chain">Chain</button>
+      <button type="button" data-f="top1">Top 1%</button>
+      <button type="button" data-f="events">Events</button>
+      <button type="button" data-f="signal">Signal</button>
+    </div>
+    <input id="notify-search" class="notify-search" placeholder="filter symbol / text&hellip;" spellcheck="false" maxlength="30">
+  </div>
+  <ul id="notify-list" class="notify-list"></ul>
+</div>
+
+<main class="dash">
+  <!-- ------------------------------------------------ watchlist -->
+  <aside class="rail-left">
+    <form id="search-form" class="search" autocomplete="off">
+      <input id="search" placeholder="symbol e.g. SOLUSDT" spellcheck="false" maxlength="20" title="Focus with /">
+      <button type="submit">WATCH</button>
+    </form>
+    <div class="card">
+      <div class="card-head"><h3>Futures gainers<small>24h</small></h3><span class="muted small" id="gainers-upd">&mdash;</span></div>
+      <ul id="gainers" class="gainers"><li class="empty">loading&hellip;</li></ul>
+    </div>
+  </aside>
+
+  <!-- ------------------------------------------------ chart + TA -->
+  <section class="center">
+    <div class="card">
+      <div class="chart-head">
+        <div class="coin">
+          <div class="coin-icon" id="coin-icon">? </div>
+          <div>
+            <div class="coin-line">
+              <b id="sym">&mdash;</b>
+              <span class="mkt-badge" id="mkt">&mdash;</span>
+              <span class="live" id="live-badge"><span class="dot"></span>live</span>
+            </div>
+            <div class="price-line">
+              <span class="price" id="price">&mdash;</span>
+              <span class="chg" id="chg">&mdash;</span>
+              <span class="muted small" id="price-note"></span>
+            </div>
+          </div>
+        </div>
+        <div class="chart-ctrls">
+          <button id="bigchart" class="icon-btn" type="button" aria-label="Big chart mode" title="Big chart mode: hide side rails for full-width candles (b)">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5V4h5.5M14.5 4H20v5.5M20 14.5V20h-5.5M9.5 20H4v-5.5"/></svg>
+          </button>
+          <div class="seg" id="mode" role="group" aria-label="Chart type">
+            <button class="on" data-m="candle" title="Candlesticks" aria-label="Candlesticks">
+              <svg viewBox="0 0 24 24"><rect x="5" y="8" width="5" height="8" rx="1"/><path d="M7.5 4v4M7.5 16v4"/><rect x="14" y="6" width="5" height="9" rx="1"/><path d="M16.5 3v3M16.5 15v5"/></svg>
+            </button>
+            <button data-m="line" title="Line" aria-label="Line">
+              <svg viewBox="0 0 24 24"><path d="M3 3v18h18M7 15l4-5 3 3 5-7"/></svg>
+            </button>
+          </div>
+          <div class="seg" id="tf" role="group" aria-label="Timeframe" title="Timeframe (1&ndash;5)">
+            <button data-t="1m">1m</button><button data-t="5m" class="on">5m</button><button data-t="15m">15m</button><button data-t="1h">1h</button><button data-t="4h">4h</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="overlay-bar" id="overlay-bar" role="group" aria-label="Algorithm overlays">
+        <button class="chip" data-ov="emas" title="Triple EMA 8/13/21 (SMA-seeded, closed bars): stacked = trend state; triangles mark crosses into up/down; the EMA cascade panel times 5m &rarr; 15m &rarr; 1h &rarr; 4h propagation">EMA 8 &middot; 13 &middot; 21</button>
+        <button class="chip" data-ov="pivots" title="Fractal swing pivots (k=3) — the raw material for zones and BOS">Swing pivots</button>
+        <button class="chip" data-ov="structure" title="ZigZag structure: HH / HL / LH / LL and change of character — teal = bullish labels and flips, red = bearish">Structure</button>
+        <button class="chip" data-ov="bos" title="Smart-money structure breaks on close: BOS = break with the trend (continuation), CHoCH = break against it (change of character, flips the bias). Teal = broke a high, red = broke a low">BOS &middot; CHoCH</button>
+        <button class="chip" data-ov="zones" title="Recency &amp; volume-weighted resistance zones (pivot clusters)">Resistance zones</button>
+        <button class="chip" data-ov="avwap" title="Anchored VWAP from the heaviest-volume bar + 1 sigma band">AVWAP</button>
+        <button class="chip" data-ov="box" title="Plateau box: last 36 bars, height in ATR units">Plateau box</button>
+        <button class="chip" data-ov="divs" title="Regular RSI divergence — red = bearish (price HH, RSI LH), teal = bullish (price LL, RSI HL)">Divergence</button>
+        <button class="chip" data-ov="rsi" title="RSI(14) sub-pane with the same divergence pairing; the line turns red in overbought (70+), green in oversold (30&minus;), yellow otherwise">RSI pane</button>
+        <span class="chip-note" id="squeeze-badge" title="Squeeze guard (fail-closed): blocks while OI rises, funding is extreme and price is at highs">squeeze guard: &mdash;</span>
+      </div>
+
+      <div class="chart-wrap" id="chart-wrap">
+        <canvas id="chart" tabindex="0" aria-label="Price chart with algorithm overlays; scroll or pinch to zoom, drag to pan, two-finger scroll to move both axes, double-click or double-tap to focus-zoom on a spot, Escape or double-click at max zoom to reset, left/right arrow keys to move the cursor"></canvas>
+        <div class="tip" id="tip"></div>
+        <div class="chart-status" id="chart-status"></div>
+        <button class="chart-live" id="chart-live" hidden title="Jump back to the live edge (or press Escape)">&rarr; realtime</button>
+      </div>
+
+      <div class="chart-foot muted small">
+        <span id="chart-foot">&mdash;</span>
+        <span>observations, not a validated signal &mdash; G0 killed the short-edge hypothesis 2026-10-17</span>
+      </div>
+    </div>
+
+    <div class="ta">
+      <article class="card bars-card">
+        <div class="card-head"><h3>Volume<small>last 7 candles</small></h3><span class="muted small" id="vol7-sum">&mdash;</span></div>
+        <div class="bars" id="bars"></div>
+      </article>
+      <article class="card" data-ring="volz">
+        <div class="card-head"><h3>Vol z<small>1h vs 7d</small></h3></div>
+        <div class="ring-body" data-c1="#2e8bff" data-c2="#35c2ff"></div>
+      </article>
+      <article class="card" data-ring="funding">
+        <div class="card-head"><h3>Funding<small>30d percentile</small></h3></div>
+        <div class="ring-body" data-c1="#ff9d2e" data-c2="#ffd23f"></div>
+      </article>
+      <article class="card" data-ring="plateau">
+        <div class="card-head"><h3>Plateau score<small>36-bar box</small></h3></div>
+        <div class="ring-body" data-c1="#9b6bff" data-c2="#d08bff"></div>
+      </article>
+    </div>
+  </section>
+
+  <!-- ------------------------------------------------ observation -->
+  <aside class="rail-right">
+    <div class="card obs-card">
+      <div class="card-head"><h3>Observation</h3><span id="state" class="badge">&mdash;</span></div>
+      <div class="chips" id="events"><span class="ev">no snapshot yet</span></div>
+      <div class="meta" id="meta"></div>
+      <div class="muted small" id="stream-status" style="margin-top:12px">&nbsp;</div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Layers now<small>from the loaded chart</small></h3></div>
+      <div class="meta" id="layers"></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>EMA cascade<small>8 / 13 / 21 &middot; 5m &rarr; 4h</small></h3><span class="muted small" id="ema-upd">&mdash;</span></div>
+      <div class="ema-alert" id="ema-alert"></div>
+      <div class="ema-rows" id="ema-rows"><div class="muted small">waiting for chart&hellip;</div></div>
+      <div class="ema-pattern" id="ema-pattern"></div>
+      <div class="muted small" id="ema-errors" style="margin-top:6px"></div>
+    </div>
+  </aside>
+</main>
+
+<!-- ------------------------------------------------ signals -->
+<section class="signal-wrap">
+  <div class="card signals-panel">
+    <div class="card-head">
+      <div><h3>Short signals<small>sentinel journal</small></h3></div>
+      <div class="muted small"><span id="signals-sum">&mdash;</span> <span id="signals-upd"></span></div>
+    </div>
+    <div class="chips" id="signals-triggered"></div>
+    <div class="table-scroll">
+      <table class="signals" id="signals-table">
+        <thead><tr><th>time</th><th>symbol</th><th>state</th><th>entry</th><th>stop</th><th>tp1</th><th>tp2</th><th>score</th><th>why</th></tr></thead>
+        <tbody><tr><td colspan="9" class="empty">loading&hellip;</td></tr></tbody>
+      </table>
+    </div>
+    <div class="muted small" style="margin-top:10px">State-machine journal written by <code>scripts/sentinel.py</code>. G0 killed the edge 2026-10-17 &mdash; these rows are observations, not a validated signal.</div>
+  </div>
+</section>
+
+<script src="/static/chart.js"></script>
+<script src="/static/logo.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
