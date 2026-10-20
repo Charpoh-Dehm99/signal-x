@@ -862,13 +862,48 @@ async function loadSignals() {
 }
 
 function fmtTime(ms) {
-  return ms == null ? "\u2014" : new Date(ms).toLocaleTimeString();
+  if (ms == null) return "\u2014";
+  const d = new Date(ms);
+  const today = new Date();
+  const time = d.toLocaleTimeString();
+  if (d.toDateString() === today.toDateString()) return time;
+  const day = d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return day + " " + time;
+}
+
+function fmtAge(ms) {
+  if (ms == null || !isFinite(ms)) return "\u2014";
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 5) return "just now";
+  if (s < 60) return s + "s ago";
+  const m = Math.round(s / 60);
+  if (m < 60) return m + "m ago";
+  const h = Math.round(m / 60);
+  if (h < 48) return h + "h ago";
+  return Math.round(h / 24) + "d ago";
 }
 
 function renderSignals(data) {
   const tb = $("signals-table").querySelector("tbody");
   const rows = data.rows || [];
-  $("signals-upd").textContent = "updated " + new Date().toLocaleTimeString();
+  /* freshness of the DATA, not of this fetch: heartbeat first (sparse journal
+     transitions can be hours apart even while the sentinel is healthy). */
+  const newest = data.latest_ts_ms != null ? data.latest_ts_ms : (rows.length ? rows[0].ts_ms : null);
+  const nowMs = data.now_ms || Date.now();
+  const sent = data.sentinel || {};
+  const upd = $("signals-upd");
+  if (sent.known) {
+    upd.textContent = (sent.running ? "sentinel live \u00b7 last sweep " : "sentinel offline \u00b7 last sweep ") +
+      fmtAge(sent.age_ms);
+    upd.className = "journal-health " + (sent.running ? "online" : "offline");
+  } else if (newest != null) {
+    upd.textContent = "journal last row " + fmtAge(nowMs - newest);
+    upd.className = "journal-health unknown";
+  } else {
+    upd.textContent = "journal empty";
+    upd.className = "journal-health unknown";
+  }
+  upd.title = "Data freshness from the sentinel journal/heartbeat; fetch time is not shown as freshness.";
   const triggered = rows.filter((r) => r.event === "SIGNAL");
   /* chime once per new journal entry (first render seeds silently) */
   const fresh = triggered.filter((r) => !signalKeys.has(r.ts_ms + "|" + r.symbol));

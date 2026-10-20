@@ -57,6 +57,10 @@ from signalx.validation import ValidationError, validate_interval, validate_symb
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 JOURNAL_DIR = Path(os.environ.get("SIGNALX_JOURNAL_DIR", str(ROOT / "data" / "journal")))
+HEARTBEAT_PATH = Path(os.environ.get(
+    "SIGNALX_HEARTBEAT", str(ROOT / "data" / "sentinel_heartbeat.json")
+))
+HEARTBEAT_STALE_MS = 5 * 60 * 1000  # sentinel sweeps every 60s; 5m = offline
 MIN_STREAM_INTERVAL_S = 1.0
 DEFAULT_STREAM_INTERVAL_S = 30.0
 MAX_STREAM_INTERVAL_S = 3600.0
@@ -193,12 +197,32 @@ def _map_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=400, detail=str(exc))
 
 
+def _sentinel_status(now_ms: int) -> dict:
+    """Freshness of the sentinel daemon from its sweep heartbeat file."""
+    try:
+        hb = json.loads(HEARTBEAT_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"known": False, "running": False, "age_ms": None}
+    if not isinstance(hb, dict) or not isinstance(hb.get("ts_ms"), int):
+        return {"known": False, "running": False, "age_ms": None}
+    age_ms = max(0, now_ms - hb["ts_ms"])
+    out = {"known": True, "running": age_ms <= HEARTBEAT_STALE_MS,
+           "age_ms": age_ms, "ts_ms": hb["ts_ms"]}
+    for key in ("tf", "symbols", "active", "rows", "journal_rows"):
+        if key in hb:
+            out[key] = hb[key]
+    return out
+
+
 @app.get("/api/health")
 async def health() -> dict:
+    now_ms = int(time.time() * 1000)
     return {
         "ok": True,
         "tool": "signal-x",
         "note": "observation only; G0 rerun killed 2026-10-17 — no validated edge",
+        "now_ms": now_ms,
+        "sentinel": _sentinel_status(now_ms),
     }
 
 
@@ -210,7 +234,9 @@ async def signals(
     """Sentinel journal rows (newest first) + latest known state per symbol.
 
     Rows come from the day-partitioned Parquet journal written by
-    scripts/sentinel.py. Empty journal => empty rows (sentinel not running).
+    scripts/sentinel.py. Transitions are sparse, so the response also carries
+    `now_ms` + `latest_ts_ms` and the sentinel's sweep heartbeat; the UI must
+    never present fetch time as data freshness. Empty journal => empty rows.
     """
     all_rows = SignalJournal(JOURNAL_DIR).read_all()
     latest: dict[str, dict] = {}
@@ -224,7 +250,16 @@ async def signals(
     rows = [r for r in all_rows if r["event"] == "SIGNAL"] if signals_only else all_rows
     rows = rows[-limit:]
     rows.reverse()
-    return {"rows": rows, "latest": latest, "total": len(all_rows)}
+    now_ms = int(time.time() * 1000)
+    latest_ts_ms = max((r["ts_ms"] for r in all_rows), default=None)
+    return {
+        "rows": rows,
+        "latest": latest,
+        "total": len(all_rows),
+        "now_ms": now_ms,
+        "latest_ts_ms": latest_ts_ms,
+        "sentinel": _sentinel_status(now_ms),
+    }
 
 
 @app.get("/api/gainers")
@@ -378,7 +413,12 @@ async def overlays(
     client: httpx.AsyncClient = Depends(get_client),
 ) -> dict:
     """Algorithm chart layers: pivots, structure, BOS, resistance zones,
-    AVWAP, plateau box, RSI divergence — computed on CLOSED bars only."""
+    AVWAP, plateau box, RSI divergence — computed on CLOSED bars only.
+
+    Display truncation: `breaks` = latest 6, `zones` = top 5, `divs`/`budivs`
+    = latest 4 per direction. `avwap.anchor_mode` is `display_max_volume`
+    (heaviest-volume bar over the loaded window, i.e. hindsight for display,
+    never a signal input)."""
     sym = _clean_symbol(symbol)
     tf = _clean_chart_tf(tf)
     try:

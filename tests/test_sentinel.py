@@ -273,6 +273,52 @@ class TestSymbolTracker:
         assert signal.symbol == "TESTUSDT"
         assert signal.score == pytest.approx(0.84)
 
+    def test_repeated_snapshot_of_same_bar_is_skipped(self):
+        t = SymbolTracker("TESTUSDT", bar_ms=BAR_MS)
+        bar = 1_700_000_000_000
+        s = snap(change_24h_pct=60.0, vol_z=6.0, bar_time=bar)
+        r1 = t.update(s, now_ms=bar + 10_000)
+        assert r1["state"] == "PUMP_DETECTED"
+        r2 = t.update(s, now_ms=bar + 70_000)
+        assert r2["skipped"] is True
+        assert r2["state"] == "PUMP_DETECTED"
+        assert r2["transitioned"] is False
+        assert t.sm.bars_in_state == 0  # no phantom bar elapsed
+
+    def test_new_bar_advances_the_machine(self):
+        t = SymbolTracker("TESTUSDT", bar_ms=BAR_MS)
+        bar = 1_700_000_000_000
+        t.update(snap(change_24h_pct=60.0, vol_z=6.0, bar_time=bar), now_ms=bar)
+        r = t.update(snap(
+            change_24h_pct=60.0, vol_z=6.0, bar_time=bar + BAR_MS,
+            compression={"qualifies": True, "height": 2.0}, momentum_decay=True,
+        ), now_ms=bar + BAR_MS)
+        assert r["state"] == "PLATEAU_BUILDING"
+
+    def test_wall_clock_bucket_gates_without_snapshot_bar_time(self):
+        t = SymbolTracker("TESTUSDT", bar_ms=BAR_MS)
+        t.update(snap(change_24h_pct=60.0, vol_z=6.0), now_ms=BAR_MS)
+        r = t.update(snap(change_24h_pct=60.0, vol_z=6.0), now_ms=BAR_MS + 1_000)
+        assert r["skipped"] is True
+        r2 = t.update(snap(
+            change_24h_pct=60.0, vol_z=6.0,
+            compression={"qualifies": True, "height": 2.0}, momentum_decay=True,
+        ), now_ms=2 * BAR_MS)
+        assert r2["state"] == "PLATEAU_BUILDING"
+
+    def test_invalid_snapshot_bar_time_raises(self):
+        t = SymbolTracker("TESTUSDT")
+        with pytest.raises(SentinelError):
+            t.update(snap(bar_time=True), now_ms=2_000)
+        with pytest.raises(SentinelError):
+            t.update(snap(bar_time="now"), now_ms=2_000)
+
+    def test_invalid_bar_ms_raises(self):
+        with pytest.raises(SentinelError):
+            SymbolTracker("TESTUSDT", bar_ms=0)
+        with pytest.raises(SentinelError):
+            SymbolTracker("TESTUSDT", bar_ms=True)
+
 
 # ---------------------------------------------------------------- rehydration
 
@@ -303,6 +349,15 @@ class TestRehydration:
         restore_state(t, "ARMED", ts_ms=1_000_000, bar_ms=BAR_MS, now_ms=1_000_000 + 24 * BAR_MS)
         assert t.state == State.ARMED
         assert t.sm.bars_in_state == 24
+
+    def test_restore_state_marks_transition_bar_as_evaluated(self):
+        t = SymbolTracker("TESTUSDT", bar_ms=BAR_MS)
+        ts = 300_000_000_000  # aligned 5m bucket
+        restore_state(t, "ARMED", ts_ms=ts, bar_ms=BAR_MS, now_ms=ts + 1_000)
+        assert t.last_bar_time == ts
+        r = t.update(snap(**TRIGGER_SNAP), now_ms=ts + 2_000)
+        assert r["skipped"] is True
+        assert r["state"] == "ARMED"
 
     def test_restore_state_without_timing_leaves_bar_count_zero(self):
         t = SymbolTracker("TESTUSDT")

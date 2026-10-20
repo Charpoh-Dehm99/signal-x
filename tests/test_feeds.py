@@ -66,7 +66,10 @@ def default_handler(request: httpx.Request) -> httpx.Response:
     if path == "/fapi/v1/openInterest":
         return httpx.Response(200, json={"openInterest": "12345"})
     if path == "/futures/data/openInterestHist":
-        return httpx.Response(200, json=[{"sumOpenInterest": str(100 + i)} for i in range(288)])
+        return httpx.Response(200, json=[
+            {"sumOpenInterest": str(100 + i), "timestamp": NOW - (287 - i) * 300_000}
+            for i in range(288)
+        ])
     return httpx.Response(404, json={"msg": "unrouted"})
 
 
@@ -191,6 +194,12 @@ class TestFetches:
             assert now == pytest.approx(0.0001) and len(hist) == 90
             oi_now, oi_hist = await fetch_open_interest(client, "AAAUSDT", "5m")
             assert oi_now == pytest.approx(12345.0) and len(oi_hist) == 288
+            oi_now, oi_hist, oi_times = await fetch_open_interest(
+                client, "AAAUSDT", "5m", with_times=True
+            )
+            assert len(oi_times) == len(oi_hist) == 288
+            assert oi_times[0] == NOW - 287 * 300_000
+            assert oi_times[-1] == NOW
 
 
 class TestMarketDetectAndSnapshot:
@@ -219,6 +228,7 @@ class TestMarketDetectAndSnapshot:
         assert snap["funding_pctile"] == pytest.approx(100.0)
         assert snap["oi_regime"] is not None
         assert len(snap["closes"]) == len(snap["closes_time"]) == 59
+        assert snap["bar_time"] == NOW - 300_000
 
     @pytest.mark.anyio
     async def test_poll_snapshot_spot_no_funding(self):

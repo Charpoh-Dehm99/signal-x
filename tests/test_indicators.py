@@ -20,9 +20,22 @@ def test_sma_rejects_bad_n():
 def test_rsi_monotonic_up_is_100():
     closes = list(range(1, 40))
     values = rsi(closes, 14)
-    assert values[12] is None
-    assert values[13] == pytest.approx(100.0)
+    assert values[13] is None
+    assert values[14] == pytest.approx(100.0)
     assert values[-1] == pytest.approx(100.0)
+
+
+def test_rsi_warmup_matches_canonical_wilder_seed():
+    closes = [10.0 + (i % 3) * 0.5 for i in range(30)]
+    values = rsi(closes, 14)
+    deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+    gains = [max(d, 0.0) for d in deltas]
+    losses = [max(-d, 0.0) for d in deltas]
+    avg_gain = sum(gains[:14]) / 14
+    avg_loss = sum(losses[:14]) / 14
+    expected = 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
+    assert values[14] == pytest.approx(expected)
+    assert all(v is None for v in values[:14])
 
 
 def test_rsi_monotonic_down_is_0():
@@ -44,7 +57,8 @@ def test_atr_positive_on_volatile_series():
     klines = series_from_closes([10, 12, 9, 14, 8, 15, 7, 16, 9, 13, 11, 12, 10, 14, 12],
                                 spread=0.5)
     values = atr(klines, 14)
-    assert values[-1] is not None and values[-1] > 0
+    assert values[13] is None
+    assert values[14] is not None and values[14] > 0
 
 
 def test_avwap_flat_prices_is_price_sigma_zero():

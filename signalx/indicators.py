@@ -43,21 +43,27 @@ def wilder_rma(values: list[float], n: int) -> list[float | None]:
 
 
 def rsi(closes: list[float], n: int = 14) -> list[float | None]:
-    """Wilder RSI. Returns None until enough data."""
+    """Wilder RSI. Returns None until enough data.
+
+    Canonical warmup: the first value is published at close index `n` (after
+    `n` real deltas), matching TradingView/TA-Lib. The dummy delta at index 0
+    is not part of the seed.
+    """
     if n <= 0:
         raise ValueError("n must be positive")
     if len(closes) < n + 1:
         return [None] * len(closes)
 
-    gains: list[float] = [0.0]
-    losses: list[float] = [0.0]
+    gains: list[float] = []
+    losses: list[float] = []
     for i in range(1, len(closes)):
         delta = closes[i] - closes[i - 1]
         gains.append(max(delta, 0.0))
         losses.append(max(-delta, 0.0))
 
-    avg_gain = wilder_rma(gains, n)
-    avg_loss = wilder_rma(losses, n)
+    # deltas[i] belongs to close index i+1, so prepend one None to realign.
+    avg_gain = [None] + wilder_rma(gains, n)
+    avg_loss = [None] + wilder_rma(losses, n)
 
     out: list[float | None] = []
     for g, loss in zip(avg_gain, avg_loss):
@@ -83,7 +89,10 @@ def true_range(klines: list[Kline]) -> list[float]:
 
 
 def atr(klines: list[Kline], n: int = 14) -> list[float | None]:
-    return wilder_rma(true_range(klines), n)
+    """Wilder ATR. The first bar has no previous close, so the canonical
+    seed uses TR[1..n] and the first value is published at bar index `n`."""
+    tr = true_range(klines)
+    return [None] + wilder_rma(tr[1:], n)
 
 
 def roc(values: list[float], n: int) -> list[float | None]:

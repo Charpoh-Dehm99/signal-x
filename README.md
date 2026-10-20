@@ -38,7 +38,7 @@ graph LR
   EMA cascade, overlays, journal, universe screening, studies, alerts.
 - **`scripts/`** — long-running workers and research runners (see
   [Workers & scripts](#workers--scripts)).
-- **`tests/`** — 692 pytest tests covering validation, feeds, overlays,
+- **`tests/`** — 706 pytest tests covering validation, feeds, overlays,
   studies, the API and the alert redaction layer.
 
 Data is fetched live from public Binance endpoints; nothing is written by the
@@ -107,6 +107,7 @@ Useful environment variables:
 | Variable | Default | Purpose |
 |---|---|---|
 | `SIGNALX_JOURNAL_DIR` | `data/journal` | where the API reads the sentinel journal |
+| `SIGNALX_HEARTBEAT` | `data/sentinel_heartbeat.json` | sentinel sweep heartbeat the dashboard reads for freshness |
 
 > Bind to `127.0.0.1` only. The app has **no authentication** by design — it is
 > a single-user localhost tool. If you expose it beyond your machine, put it
@@ -123,7 +124,7 @@ Useful environment variables:
 | Timeframes | `1m · 5m · 15m · 1h · 4h` |
 | Overlay chips | EMA 8·13·21, swing pivots, structure, BOS/CHoCH, resistance zones, AVWAP, plateau box, divergence, RSI pane — persisted in `localStorage` |
 | Observation panel | Live state badge, events, vol-z/funding/plateau donuts, layers readout (right rail) |
-| Signals table | Sentinel journal rows, newest first |
+| Signals table | Sentinel journal rows, newest first; header shows sentinel heartbeat age (data freshness, never fetch time) and an explicit offline state |
 | Bell | Notification history (persisted, filterable by kind, free-text search, unread tab badge) |
 | Sound | WebAudio chimes for EMA crosses/cascades, top-1% entries, journal signals, hot/warn events; volume slider |
 | Chart controls | Candle/line mode, full-width chart, reset/live pill |
@@ -164,7 +165,7 @@ TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... \
 
 | Script | Purpose |
 |---|---|
-| `sentinel.py` | Polls the watchlist, writes day-partitioned Parquet journal rows (`data/journal`), optional Telegram alerts |
+| `sentinel.py` | Polls the watchlist (one state-machine step per closed bar), writes day-partitioned Parquet journal rows (`data/journal`) plus a per-sweep heartbeat (`data/sentinel_heartbeat.json`), optional Telegram alerts |
 | `watch_symbol.py` | Single-symbol live watcher (pump/plateau/resistance/squeeze), `--once` for a snapshot |
 | `recorder.py` | Records kline cycles for the watchlist into `data/live/klines` |
 | `book.py` | Records bookTicker + depth features (spread/imbalance) |
@@ -197,11 +198,16 @@ Read-only, JSON, same-origin (no CORS).
 | `GET /api/ema-cascade/{symbol}?market=&limit=` | EMA 8/13/21 state per 5m/15m/1h/4h + cross propagation |
 | `GET /api/snapshot/{symbol}?market=&tf=` | One observation snapshot |
 | `GET /api/stream/{symbol}?market=&tf=&interval=&polls=` | SSE push loop (interval ≥ 1 s) |
-| `GET /api/signals?limit=&signals_only=` | Sentinel journal rows + latest state per symbol |
+| `GET /api/signals?limit=&signals_only=` | Sentinel journal rows + latest state per symbol + `now_ms`/`latest_ts_ms` + sentinel heartbeat status |
 | `GET /api/logos?symbols=BTC,ETH,...` | Cosmetic CoinGecko icon map (cached, always 200) |
 
 Symbols must match `^[A-Z0-9]{4,20}$` and intervals are whitelisted; invalid
 input returns `400`, upstream trouble `502`, insufficient data `422`.
+
+Overlay payloads truncate for display only: latest 6 BOS/CHoCH breaks, top 5
+resistance zones, latest 4 divergences per direction. `avwap.anchor_mode` is
+`display_max_volume` — the heaviest-volume bar over the loaded window, a
+display anchor (hindsight) that is never fed back as a signal input.
 
 ## Security posture
 
@@ -215,7 +221,7 @@ redaction in the alert layer.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest -o addopts="" -q   # 692 passed
+.venv/bin/python -m pytest -o addopts="" -q   # 706 passed
 ```
 
 ---

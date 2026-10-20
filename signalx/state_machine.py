@@ -1,8 +1,11 @@
 """Per-symbol signal state machine.
 
 One transition per evaluation step. Evaluations happen on closed bars only
-(caller's responsibility). Squeeze guard fails closed: missing/None input
-counts as "blocked".
+(the tracker gates repeated snapshots of the same bar; the raw machine still
+advances once per step it receives). Squeeze guard fails closed: missing/None
+input counts as "blocked". IN_TRADE is observation-only and non-terminal: it
+returns to IDLE after `in_trade_timeout_bars` (or on trade_closed), so a
+symbol can produce another observation later.
 """
 
 from __future__ import annotations
@@ -27,12 +30,14 @@ class StateMachine:
         pump_threshold: float = 0.6,
         plateau_timeout_bars: int = 180,
         armed_timeout_bars: int = 60,
+        in_trade_timeout_bars: int = 60,
     ) -> None:
-        if plateau_timeout_bars < 1 or armed_timeout_bars < 1:
+        if plateau_timeout_bars < 1 or armed_timeout_bars < 1 or in_trade_timeout_bars < 1:
             raise ValueError("timeouts must be >= 1")
         self.pump_threshold = pump_threshold
         self.plateau_timeout_bars = plateau_timeout_bars
         self.armed_timeout_bars = armed_timeout_bars
+        self.in_trade_timeout_bars = in_trade_timeout_bars
         self.state = State.IDLE
         self.bars_in_state = 0
         self.history: list[tuple[State, State]] = []
@@ -74,8 +79,14 @@ class StateMachine:
             return State.IN_TRADE
 
         elif state == State.IN_TRADE:
-            if f.get("trade_closed"):
-                return State.CLOSED
+            # Observation-only lifecycle: never terminal, so one symbol can
+            # produce more than one observation over its lifetime.
+            if f.get("trade_closed") or self.bars_in_state >= self.in_trade_timeout_bars:
+                return State.IDLE
+
+        elif state == State.CLOSED:
+            # Legacy journal rows may rehydrate into CLOSED; recycle them.
+            return State.IDLE
 
         return state
 

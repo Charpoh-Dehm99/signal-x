@@ -131,7 +131,7 @@ def features_from_snapshot(
         "breakout_volume_ok": bool(
             vol_ratio is not None and vol_ratio >= volume_mult
         ),
-        "trade_closed": False,
+        "trade_closed": bool(snap.get("trade_closed")),
     }
 
 
@@ -230,16 +230,25 @@ class SymbolTracker:
         pump_threshold: float = 0.6,
         plateau_timeout_bars: int = 180,
         armed_timeout_bars: int = 60,
+        in_trade_timeout_bars: int = 60,
         volume_mult: float = BREAKOUT_VOLUME_MULT,
         stop_buffer_atr: float = STOP_BUFFER_ATR,
+        bar_ms: int | None = None,
     ) -> None:
         self.symbol = validate_symbol(symbol)
+        if bar_ms is not None and (
+            isinstance(bar_ms, bool) or not isinstance(bar_ms, int) or bar_ms <= 0
+        ):
+            raise SentinelError("bar_ms must be a positive int or None")
         self.volume_mult = volume_mult
         self.stop_buffer_atr = stop_buffer_atr
+        self.bar_ms = bar_ms
+        self.last_bar_time: int | None = None
         self.sm = StateMachine(
             pump_threshold=pump_threshold,
             plateau_timeout_bars=plateau_timeout_bars,
             armed_timeout_bars=armed_timeout_bars,
+            in_trade_timeout_bars=in_trade_timeout_bars,
         )
         self.last_seen_ms = 0
         self.signals_emitted = 0
@@ -248,13 +257,45 @@ class SymbolTracker:
     def state(self) -> State:
         return self.sm.state
 
+    def _bar_time(self, snapshot: dict, now_ms: int) -> int | None:
+        """Closed-bar identity: explicit snapshot bar_time, else wall-clock bucket."""
+        raw = snapshot.get("bar_time")
+        if raw is not None:
+            if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+                raise SentinelError("snapshot bar_time must be a positive int")
+            return raw
+        if self.bar_ms:
+            return now_ms - now_ms % self.bar_ms
+        return None
+
     def update(self, snapshot: dict, *, now_ms: int) -> dict:
-        """One evaluation step on CLOSED bars. Returns a tracker result dict."""
+        """One evaluation step on CLOSED bars. Returns a tracker result dict.
+
+        A repeated snapshot of the same closed bar is a no-op: the state
+        machine advances at most once per bar, regardless of sweep cadence.
+        """
         if isinstance(now_ms, bool) or not isinstance(now_ms, int) or now_ms <= 0:
             raise SentinelError("now_ms must be a positive int")
         features = features_from_snapshot(
             snapshot, volume_mult=self.volume_mult, stop_buffer_atr=self.stop_buffer_atr
         )
+        bar_time = self._bar_time(snapshot, now_ms)
+        if bar_time is not None and self.last_bar_time is not None and bar_time <= self.last_bar_time:
+            self.last_seen_ms = now_ms
+            return {
+                "symbol": self.symbol,
+                "ts_ms": now_ms,
+                "price": _num(snapshot["price"], "price"),
+                "state": self.sm.state.value,
+                "previous": self.sm.state.value,
+                "transitioned": False,
+                "skipped": True,
+                "features": features,
+                "signal": None,
+                "plan": None,
+            }
+        if bar_time is not None:
+            self.last_bar_time = bar_time
         previous = self.sm.state
         state = self.sm.step(features)
         self.last_seen_ms = now_ms
@@ -363,7 +404,9 @@ def restore_state(
 
     bars_in_state is seeded from elapsed time since the recorded transition
     (timeouts stay honest after a restart) when bar_ms/now_ms are provided.
-    IDLE is a no-op: fresh trackers are already IDLE.
+    The transition's bar is marked as already evaluated so the first sweep in
+    the same bar cannot double-step the machine. IDLE is a no-op: fresh
+    trackers are already IDLE.
     """
     if state_value not in STATE_BY_VALUE:
         raise SentinelError(f"unknown journaled state: {state_value!r}")
@@ -371,6 +414,8 @@ def restore_state(
     if state == State.IDLE:
         return tracker
     tracker.sm.state = state
+    if bar_ms > 0 and isinstance(ts_ms, int) and not isinstance(ts_ms, bool) and ts_ms > 0:
+        tracker.last_bar_time = ts_ms - ts_ms % bar_ms
     if bar_ms > 0 and now_ms > 0 and isinstance(ts_ms, int) and ts_ms > 0:
         tracker.sm.bars_in_state = max(0, (now_ms - ts_ms) // bar_ms)
     return tracker

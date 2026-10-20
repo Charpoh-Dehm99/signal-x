@@ -5,7 +5,8 @@ from __future__ import annotations
 import pytest
 
 from signalx.live import LiveError, live_snapshot, volume_z
-from tests.helpers import START_MS, mk_kline
+from signalx.models import Pivot
+from tests.helpers import MIN_MS, START_MS, mk_kline, series_from_closes
 
 MS5 = 300_000
 
@@ -79,12 +80,58 @@ class TestSnapshot:
     def test_bullish_divergence_event_and_flag(self, monkeypatch):
         import signalx.live as live
 
+        fresh = (
+            Pivot(80, 99.0, "L", 82, 0.0),
+            Pivot(86, 98.0, "L", 88, 0.0),
+            Pivot(81, 30.0, "L", 83, 0.0),
+            Pivot(85, 35.0, "L", 87, 0.0),
+        )
         monkeypatch.setattr(live, "find_bearish_divergences", lambda *a, **k: [])
-        monkeypatch.setattr(live, "find_bullish_divergences", lambda *a, **k: [(1, 2, 3, 4)])
+        monkeypatch.setattr(live, "find_bullish_divergences", lambda *a, **k: [fresh])
         snap = live_snapshot(symbol="TESTUSDT", klines5m=flat(90))
         assert snap["has_bullish_div"] is True
+        assert snap["bullish_div_age"] == 1
         assert "BULLISH_DIVERGENCE" in snap["events"]
         assert "BEARISH_DIVERGENCE" not in snap["events"]
+
+    def test_stale_divergence_is_not_an_event(self, monkeypatch):
+        import signalx.live as live
+
+        stale = (
+            Pivot(20, 99.0, "L", 22, 0.0),
+            Pivot(26, 98.0, "L", 28, 0.0),
+            Pivot(21, 30.0, "L", 23, 0.0),
+            Pivot(25, 35.0, "L", 27, 0.0),
+        )
+        monkeypatch.setattr(live, "find_bearish_divergences", lambda *a, **k: [])
+        monkeypatch.setattr(live, "find_bullish_divergences", lambda *a, **k: [stale])
+        snap = live_snapshot(symbol="TESTUSDT", klines5m=flat(90))
+        assert snap["has_bullish_div"] is False
+        assert snap["bullish_div_age"] == 61
+        assert "BULLISH_DIVERGENCE" not in snap["events"]
+
+    def test_contradictory_divergences_keep_fresher_side(self, monkeypatch):
+        import signalx.live as live
+
+        bear = (
+            Pivot(70, 101.0, "H", 72, 0.0),
+            Pivot(86, 102.0, "H", 88, 0.0),
+            Pivot(71, 70.0, "H", 73, 0.0),
+            Pivot(85, 65.0, "H", 87, 0.0),
+        )
+        bull = (
+            Pivot(60, 99.0, "L", 62, 0.0),
+            Pivot(80, 98.0, "L", 82, 0.0),
+            Pivot(61, 30.0, "L", 63, 0.0),
+            Pivot(79, 35.0, "L", 81, 0.0),
+        )
+        monkeypatch.setattr(live, "find_bearish_divergences", lambda *a, **k: [bear])
+        monkeypatch.setattr(live, "find_bullish_divergences", lambda *a, **k: [bull])
+        snap = live_snapshot(symbol="TESTUSDT", klines5m=flat(90))
+        assert snap["has_bearish_div"] is True
+        assert snap["has_bullish_div"] is False
+        assert "BEARISH_DIVERGENCE" in snap["events"]
+        assert "BULLISH_DIVERGENCE" not in snap["events"]
 
     def test_no_divergence_on_flat_series(self):
         snap = live_snapshot(symbol="TESTUSDT", klines5m=flat(90))
@@ -160,6 +207,33 @@ class TestSnapshot:
         assert snap["squeeze_active"] is True
         assert snap["state"] == "SQUEEZE_RISK"
         assert "SQUEEZE_GUARD" in snap["events"]
+
+    def test_oi_delta_aligns_to_first_price_bar_by_timestamp(self, monkeypatch):
+        import signalx.live as live
+
+        captured = {}
+
+        def fake_regime(delta_oi, delta_price, at_highs):
+            captured.update(delta_oi=delta_oi, delta_price=delta_price, at_highs=at_highs)
+            return "TREND_FUEL"
+
+        monkeypatch.setattr(live, "oi_price_regime", fake_regime)
+        k = series_from_closes([100.0 + i for i in range(300)], spread=0.0)
+        oi_times = [START_MS + MIN_MS + i * 5 * MIN_MS for i in range(60)]
+        oi_hist = [1000.0 + i for i in range(60)]
+        live_snapshot(
+            symbol="TESTUSDT",
+            klines5m=k,
+            funding_now=0.0001,
+            funding_history=[0.0001] * 30,
+            oi_now=2000.0,
+            oi_history=oi_hist,
+            oi_times=oi_times,
+        )
+        # Reference bar is bar 1 (101.0), not 300 - 60 = bar 240 (340.0).
+        assert captured["delta_price"] == pytest.approx(399.0 / 101.0 - 1.0)
+        assert captured["delta_oi"] == pytest.approx(2000.0 / 1000.0 - 1.0)
+        assert captured["at_highs"] is True
 
     def test_momentum_decay_event(self):
         steps = [max(2.0 - i * 0.02, 0.05) for i in range(89)]

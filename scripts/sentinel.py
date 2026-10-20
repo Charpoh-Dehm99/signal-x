@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 import time
 from pathlib import Path
@@ -52,6 +53,14 @@ def _ts() -> str:
     return time.strftime("%H:%M:%S", time.gmtime())
 
 
+def _write_heartbeat(path: Path, payload: dict) -> None:
+    """Atomically publish the sweep heartbeat for the dashboard."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    tmp.replace(path)
+
+
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -66,6 +75,8 @@ def parse_args(argv=None):
                     help="min 24h quote volume for gainers")
     ap.add_argument("--journal", default=str(ROOT / "data" / "journal"),
                     help="journal directory (day-partitioned parquet)")
+    ap.add_argument("--heartbeat", default=str(ROOT / "data" / "sentinel_heartbeat.json"),
+                    help="sweep heartbeat JSON updated every loop (dashboard freshness)")
     ap.add_argument("--pump-threshold", type=float, default=0.6,
                     help="state machine pump_score threshold (0, 1]")
     ap.add_argument("--once", action="store_true", help="single sweep, then exit")
@@ -106,7 +117,9 @@ async def sweep(
             continue
         tracker = trackers.get(sym)
         if tracker is None:
-            tracker = SymbolTracker(sym, pump_threshold=args.pump_threshold)
+            tracker = SymbolTracker(
+                sym, pump_threshold=args.pump_threshold, bar_ms=bar_ms
+            )
             hint = state_hints.get(sym)
             if hint is not None and hint["state"] != "IDLE":
                 restore_state(
@@ -155,8 +168,10 @@ async def sweep(
 
 async def run(args, extra_symbols: list[str], creds: dict | None) -> int:
     journal = SignalJournal(args.journal)
+    heartbeat_path = Path(args.heartbeat)
     trackers: dict[str, SymbolTracker] = {}
     print(f"journal: {args.journal} ({journal.count()} rows)")
+    print(f"heartbeat: {heartbeat_path}")
     state_hints = latest_journal_states(journal.read_all())
     bar_ms = TF_MS[args.tf]
     non_idle = {s: h for s, h in state_hints.items() if h["state"] != "IDLE"}
@@ -189,6 +204,8 @@ async def run(args, extra_symbols: list[str], creds: dict | None) -> int:
                     continue
                 clean.append(s)
             symbols = clean
+            rows = 0
+            active = 0
             if not symbols:
                 print(f"[{_ts()}] no symbols this sweep")
             else:
@@ -204,6 +221,15 @@ async def run(args, extra_symbols: list[str], creds: dict | None) -> int:
                     f"[{_ts()}] sweep: {len(symbols)} symbols, {active} active, "
                     f"{rows} journal rows (journal total {journal.count()})"
                 )
+            _write_heartbeat(heartbeat_path, {
+                "ts_ms": int(time.time() * 1000),
+                "tf": args.tf,
+                "interval_s": args.interval,
+                "symbols": len(symbols),
+                "active": active,
+                "rows": rows,
+                "journal_rows": journal.count(),
+            })
             if args.once:
                 return 0
             await asyncio.sleep(max(args.interval, MIN_INTERVAL_S))

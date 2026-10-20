@@ -26,6 +26,7 @@ const ChartX = (() => {
   let raf = 0;
   let animRaf = 0;
   const MIN_BARS = 24;          // hard zoom-in limit
+  const MIN_BAR_PX = 4;         // candle-mode fit: never cram bars into <4px slots
   let view = { start: 0, count: 0 };  // visible window over candles (count 0 = all)
   let drag = null;
   let vScrollPx = 0;            // manual vertical (price) scroll offset in px
@@ -40,12 +41,26 @@ const ChartX = (() => {
     const n = candles.length || 1;
     return clamp(view.count > 0 ? view.count : n, Math.min(MIN_BARS, n), n);
   }
+  /* max bars that still render readable candles: phones get ~60-70 bars
+     instead of smearing 300 into a solid wall of stacked 1px bars */
+  function maxViewCount() {
+    const n = candles.length || 1;
+    const minC = Math.min(MIN_BARS, n);
+    if (mode !== "candle" || !W) return n;
+    return clamp(Math.floor(plotWidth() / MIN_BAR_PX), minC, n);
+  }
+  function fitView() {
+    const n = candles.length;
+    view.count = n ? maxViewCount() : 0;
+    view.start = Math.max(0, n - view.count);
+    vScrollPx = 0;
+  }
   function clampView() {
     const n = candles.length || 1;
-    view.count = clamp(view.count || n, Math.min(MIN_BARS, n), n);
+    view.count = clamp(view.count || n, Math.min(MIN_BARS, n), maxViewCount());
     view.start = clamp(view.start, 0, Math.max(0, n - view.count));
   }
-  function resetView() { view.count = candles.length; view.start = 0; vScrollPx = 0; pinch = null; schedule(); }
+  function resetView() { fitView(); pinch = null; schedule(); }
   function atRightEdge() { return view.start + viewCount() >= candles.length - 0.01; }
   function getView() { return { start: view.start, count: viewCount(), vScroll: vScrollPx }; }
 
@@ -127,9 +142,7 @@ const ChartX = (() => {
     if (anchorT != null && timeIdx.has(anchorT)) {
       view.start = timeIdx.get(anchorT);   // same window, shifted data
     } else {
-      view.count = candles.length;         // fresh symbol/timeframe
-      view.start = 0;
-      vScrollPx = 0;
+      fitView();                           // fresh symbol/timeframe: right edge, readable
     }
     clampView();
     draw();
@@ -165,7 +178,12 @@ const ChartX = (() => {
     draw();
   }
 
-  function setMode(m) { mode = m; draw(); }
+  function setMode(m) {
+    const wasRight = atRightEdge();
+    mode = m;
+    if (wasRight) fitView();   // stay glued to the live edge at the new density
+    draw();
+  }
   function setToggles(next) { show = Object.assign({}, show, next); draw(); }
   function getCandles() { return candles; }
   function getOverlays() { return ov; }
@@ -345,7 +363,7 @@ const ChartX = (() => {
         ctx.fillStyle = PURPLE;
         ctx.beginPath(); ctx.arc(x(ai), yP(A.line[A.anchor_i]), 3, 0, Math.PI * 2); ctx.fill();
         ctx.textAlign = "left";
-        ctx.fillText("AVWAP", x(ai) + 6, yP(A.line[A.anchor_i]) - 10);
+        ctx.fillText("AVWAP \u00b7 display", x(ai) + 6, yP(A.line[A.anchor_i]) - 10);
       }
     }
 
@@ -832,7 +850,7 @@ const ChartX = (() => {
     const rowH = plotWidth() / vc;
     const pxClamped = clamp(px, PAD.l, PAD.l + plotWidth());
     const anchor = view.start + (pxClamped - PAD.l) / rowH;
-    const next = clamp(vc * factor, Math.min(MIN_BARS, n), n);
+    const next = clamp(vc * factor, Math.min(MIN_BARS, n), maxViewCount());
     view.count = next;
     view.start = anchor - (pxClamped - PAD.l) / (plotWidth() / next);
     clampView();
@@ -896,10 +914,14 @@ const ChartX = (() => {
     if (liveEl) liveEl.addEventListener("click", resetView);
     const resize = () => {
       const dpr = window.devicePixelRatio || 1;
+      const wasFit = candles.length > 0 && viewCount() >= maxViewCount() - 0.01;
       W = wrap.clientWidth;
       H = wrap.clientHeight;
       cv.width = Math.max(1, Math.round(W * dpr));
       cv.height = Math.max(1, Math.round(H * dpr));
+      /* rotation/resize: a fitted window re-fits to the new width and stays
+         pinned to the live edge instead of leaving bars stacked */
+      if (wasFit) fitView();
       draw();
     };
     new ResizeObserver(resize).observe(wrap);

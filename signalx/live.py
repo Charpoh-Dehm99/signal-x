@@ -12,6 +12,8 @@ Fail-loud policy: malformed inputs raise LiveError. Futures-only inputs
 
 from __future__ import annotations
 
+from bisect import bisect_right
+
 from .compression import compression_metrics, momentum_decaying
 from .divergence import (
     find_bearish_divergences,
@@ -32,6 +34,28 @@ class LiveError(RuntimeError):
 
 def _last_defined(seq: list[float | None]) -> float | None:
     return next((v for v in reversed(seq) if v is not None), None)
+
+
+def _confirm_index(pivot: object) -> int:
+    """Confirmation bar of a divergence pivot (Pivot or bare bar index)."""
+    idx = getattr(pivot, "confirmed_index", None)
+    if idx is None:
+        idx = getattr(pivot, "index", None)
+    if idx is None and isinstance(pivot, int) and not isinstance(pivot, bool):
+        idx = pivot
+    if isinstance(idx, bool) or not isinstance(idx, int):
+        raise LiveError("divergence pivot missing a valid confirmation index")
+    return idx
+
+
+def _divergence_age(divs: list[tuple], n_bars: int) -> int | None:
+    """Age in closed bars of the most recently confirmed divergence."""
+    if not divs:
+        return None
+    confirmed = max(
+        max(_confirm_index(d[1]), _confirm_index(d[3])) for d in divs
+    )
+    return max(0, n_bars - 1 - confirmed)
 
 
 def volume_z(closed_qv: list[float], *, window: int = 168, min_periods: int = 120) -> float | None:
@@ -66,8 +90,10 @@ def live_snapshot(
     funding_history: list[float] | None = None,
     oi_now: float | None = None,
     oi_history: list[float] | None = None,
+    oi_times: list[int] | None = None,
     atr_n: int = 14,
     pivot_k: int = 3,
+    divergence_max_age_bars: int = 12,
     plateau_window: int = 36,
     max_height_atr: float = 4.5,
     min_containment: float = 0.5,
@@ -141,8 +167,16 @@ def live_snapshot(
     price_lows = [p for p in pivots if p.kind == "L"]
     divs = find_bearish_divergences(price_highs, rsi_high_pivots(rsi_vals, k=2))
     budivs = find_bullish_divergences(price_lows, rsi_low_pivots(rsi_vals, k=2))
-    has_div = len(divs) > 0
-    has_budiv = len(budivs) > 0
+    bear_age = _divergence_age(divs, len(klines5m))
+    bull_age = _divergence_age(budivs, len(klines5m))
+    has_div = bear_age is not None and bear_age <= divergence_max_age_bars
+    has_budiv = bull_age is not None and bull_age <= divergence_max_age_bars
+    if has_div and has_budiv:
+        # Both cannot be current; keep the fresher signal (bearish wins ties).
+        if bull_age < bear_age:
+            has_div = False
+        else:
+            has_budiv = False
     momentum_decay = momentum_decaying(roc(closes, 12), lookback=3)
 
     # --- futures context (optional) ----------------------------------------
@@ -154,12 +188,24 @@ def live_snapshot(
     squeeze_active: bool | None = None
     if funding_now is not None and funding_history and oi_now is not None and oi_history:
         hist = [v for v in oi_history if v is not None]
+        # Align OI to the price window by timestamp: OI is often sampled at a
+        # different period (e.g. 5m OI vs 1m bars), so counting bars back from
+        # the end compares different lookbacks. Both deltas must start at the
+        # same time.
+        if oi_times and len(oi_times) == len(oi_history):
+            open_times = [k.open_time for k in klines5m]
+            start = bisect_right(oi_times, open_times[0]) - 1
+            start = max(0, min(start, len(oi_times) - 1))
+            ref_idx = max(0, min(bisect_right(open_times, oi_times[start]) - 1,
+                                 len(klines5m) - 1))
+            hist = [v for v in oi_history[start:] if v is not None]
+        else:
+            ref_idx = max(len(klines5m) - len(hist), 0)
         if len(hist) >= 2 and hist[0] > 0:
             delta_oi_pct = oi_now / hist[0] - 1.0
-            ref_idx = max(len(klines5m) - len(hist), 0)
             ref_close = closes[ref_idx]
             delta_price_pct = price / ref_close - 1.0 if ref_close > 0 else 0.0
-            at_highs = price >= 0.999 * max(highs[-len(hist):])
+            at_highs = price >= 0.999 * max(highs[ref_idx:])
             oi_regime = oi_price_regime(delta_oi_pct, delta_price_pct, at_highs)
             squeeze_active = squeeze_guard(
                 oi_rising=delta_oi_pct > 0,
@@ -222,6 +268,9 @@ def live_snapshot(
         "rsi": rsi_last,
         "has_bearish_div": has_div,
         "has_bullish_div": has_budiv,
+        "bearish_div_age": bear_age,
+        "bullish_div_age": bull_age,
+        "divergence_max_age_bars": divergence_max_age_bars,
         "momentum_decay": momentum_decay,
         "funding_now": funding_now,
         "funding_pctile": funding_pctile,

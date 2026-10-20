@@ -681,6 +681,7 @@ class TestSignals:
     async def test_rows_newest_first_and_latest_map(self, tmp_path, monkeypatch):
         seed_journal(tmp_path)
         monkeypatch.setattr(server, "JOURNAL_DIR", tmp_path)
+        monkeypatch.setattr(server, "HEARTBEAT_PATH", tmp_path / "missing.json")
         async with make_client() as c:
             r = await c.get("/api/signals")
         body = r.json()
@@ -688,6 +689,45 @@ class TestSignals:
         assert [row["event"] for row in body["rows"]] == ["SIGNAL", "TRANSITION"]
         assert body["rows"][0]["entry"] == 1.20
         assert body["latest"]["AAAUSDT"]["state"] == "TRIGGERED"
+        assert body["latest_ts_ms"] == 1_700_000_060_000
+        assert body["now_ms"] >= body["latest_ts_ms"]
+        assert body["sentinel"]["known"] is False
+
+    @pytest.mark.anyio
+    async def test_live_sentinel_heartbeat_reported_running(self, tmp_path, monkeypatch):
+        import time as _time
+
+        hb = tmp_path / "heartbeat.json"
+        hb.write_text(json.dumps({
+            "ts_ms": int(_time.time() * 1000),
+            "tf": "5m", "symbols": 42, "active": 3, "rows": 1, "journal_rows": 9,
+        }))
+        monkeypatch.setattr(server, "JOURNAL_DIR", tmp_path / "journal")
+        monkeypatch.setattr(server, "HEARTBEAT_PATH", hb)
+        async with make_client() as c:
+            r = await c.get("/api/signals")
+        sent = r.json()["sentinel"]
+        assert sent["known"] is True
+        assert sent["running"] is True
+        assert sent["age_ms"] < server.HEARTBEAT_STALE_MS
+        assert sent["symbols"] == 42
+
+    @pytest.mark.anyio
+    async def test_stale_or_missing_heartbeat_reports_offline(self, tmp_path, monkeypatch):
+        hb = tmp_path / "heartbeat.json"
+        hb.write_text(json.dumps({"ts_ms": 1_000}))
+        monkeypatch.setattr(server, "JOURNAL_DIR", tmp_path / "journal")
+        monkeypatch.setattr(server, "HEARTBEAT_PATH", hb)
+        async with make_client() as c:
+            stale = (await c.get("/api/signals")).json()["sentinel"]
+            health = (await c.get("/api/health")).json()["sentinel"]
+        assert stale["known"] is True and stale["running"] is False
+        assert health["known"] is True and health["running"] is False
+
+        monkeypatch.setattr(server, "HEARTBEAT_PATH", tmp_path / "missing.json")
+        async with make_client() as c:
+            missing = (await c.get("/api/signals")).json()["sentinel"]
+        assert missing == {"known": False, "running": False, "age_ms": None}
 
     @pytest.mark.anyio
     async def test_signals_only_filter_keeps_total_unfiltered(self, tmp_path, monkeypatch):

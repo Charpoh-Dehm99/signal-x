@@ -205,8 +205,10 @@ async def fetch_funding(client: httpx.AsyncClient, symbol: str) -> tuple[float, 
 
 
 async def fetch_open_interest(
-    client: httpx.AsyncClient, symbol: str, period: str
-) -> tuple[float, list[float]]:
+    client: httpx.AsyncClient, symbol: str, period: str, *, with_times: bool = False
+) -> tuple:
+    """Current OI + history. With `with_times`, also returns each sample's ms
+    timestamp so callers can align OI to price bars of any timeframe."""
     payload = await _get_json(client, FUTURES_BASE, "/fapi/v1/openInterest", {"symbol": symbol})
     if not isinstance(payload, dict):
         raise FeedError("malformed openInterest payload")
@@ -216,7 +218,15 @@ async def fetch_open_interest(
     if not isinstance(rows, list) or len(rows) < 2:
         raise FeedError("malformed openInterestHist payload")
     hist = [_num(r.get("sumOpenInterest"), "sumOpenInterest") for r in rows]
-    return oi_now, hist
+    if not with_times:
+        return oi_now, hist
+    times: list[int] = []
+    for r in rows:
+        ts = r.get("timestamp")
+        if isinstance(ts, bool) or not isinstance(ts, int) or ts <= 0:
+            raise FeedError("malformed openInterestHist timestamp")
+        times.append(ts)
+    return oi_now, hist, times
 
 
 async def detect_market(client: httpx.AsyncClient, symbol: str) -> str:
@@ -245,11 +255,11 @@ async def poll_snapshot(
     hourly = await fetch_klines(client, market, symbol, "1h", now_ms)
     change = await fetch_ticker(client, market, symbol)
 
-    funding_now = funding_hist = oi_now = oi_hist = None
+    funding_now = funding_hist = oi_now = oi_hist = oi_times = None
     if market == "futures":
         funding_now, funding_hist = await fetch_funding(client, symbol)
-        oi_now, oi_hist = await fetch_open_interest(
-            client, symbol, tf if tf in OI_PERIODS else "5m"
+        oi_now, oi_hist, oi_times = await fetch_open_interest(
+            client, symbol, tf if tf in OI_PERIODS else "5m", with_times=True
         )
 
     snap = live_snapshot(
@@ -261,7 +271,9 @@ async def poll_snapshot(
         funding_history=funding_hist,
         oi_now=oi_now,
         oi_history=oi_hist,
+        oi_times=oi_times,
     )
+    snap["bar_time"] = klines[-1].open_time
     tail = klines[-spark_closes:]
     snap["market"] = market
     snap["tf"] = tf

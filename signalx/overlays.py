@@ -65,7 +65,13 @@ def build_overlays(
     box_max_height_atr: float = 4.5,
     box_min_containment: float = 0.5,
 ) -> dict:
-    """Serialize all chart layers for `klines` (closed bars only)."""
+    """Serialize all chart layers for `klines` (closed bars only).
+
+    Display truncation is intentional and part of the API contract:
+    `breaks` keeps the latest 6 events, `zones` the top `max_zones` and
+    `divs`/`budivs` the latest `max_divs`; RSI/EMA/price series stay aligned
+    to every bar in the window.
+    """
     n = len(klines)
     if n < MIN_BARS:
         raise OverlayError(f"need >= {MIN_BARS} closed klines, got {n}")
@@ -84,6 +90,8 @@ def build_overlays(
     wmax = max((z.strength for z in zones), default=0.0)
 
     # Ignition proxy for the AVWAP anchor: the heaviest-volume bar in view.
+    # Chosen over the whole loaded window, so historical points are hindsight;
+    # it is a display anchor, not a causal signal input (see anchor_mode).
     anchor = max(range(n), key=lambda i: klines[i].volume)
     line, upper, lower = _avwap_series(klines, anchor)
 
@@ -127,7 +135,13 @@ def build_overlays(
              "touches": z.touches, "strength": z.strength}
             for z in zones
         ],
-        "avwap": {"anchor_i": anchor, "line": line, "upper": upper, "lower": lower},
+        "avwap": {
+            "anchor_i": anchor,
+            "anchor_mode": "display_max_volume",  # hindsight anchor; display only
+            "line": line,
+            "upper": upper,
+            "lower": lower,
+        },
         "box": {
             "start_i": n - plateau_window, "lo": cm["box"].low, "hi": cm["box"].high,
             "height_atr": cm["height_atr"], "containment": cm["containment"],

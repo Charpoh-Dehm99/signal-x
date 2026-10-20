@@ -18,8 +18,32 @@ def test_happy_path_to_triggered():
         "squeeze_guard": False,
     }) == State.TRIGGERED
     assert sm.step({}) == State.IN_TRADE
-    assert sm.step({"trade_closed": True}) == State.CLOSED
+    assert sm.step({"trade_closed": True}) == State.IDLE
     assert len(sm.history) == 6
+
+
+def test_in_trade_times_out_to_idle_and_can_rearm():
+    sm = StateMachine(in_trade_timeout_bars=3)
+    for f in (
+        {"pump_score": 0.8},
+        {"compression_qualifies": True, "momentum_decaying": True},
+        {"near_resistance": True, "has_bearish_div": True},
+        {"bos_confirmed": True, "breakout_volume_ok": True, "squeeze_guard": False},
+        {},
+    ):
+        sm.step(f)
+    assert sm.state == State.IN_TRADE
+    for _ in range(3):
+        sm.step({})
+    assert sm.state == State.IN_TRADE
+    assert sm.step({}) == State.IDLE
+    assert sm.bars_in_state == 0
+
+
+def test_legacy_closed_state_recycles_to_idle():
+    sm = StateMachine()
+    sm.state = State.CLOSED
+    assert sm.step({}) == State.IDLE
 
 
 def test_single_transition_per_step():
