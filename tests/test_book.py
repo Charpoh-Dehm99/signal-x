@@ -13,6 +13,7 @@ from signalx.book import (
     depth_features,
     merge_book_rows,
     parse_book_message,
+    parse_depth_rest,
 )
 
 
@@ -96,6 +97,30 @@ class TestParsing:
     def test_crossed_depth_raises(self):
         with pytest.raises(BookError):
             parse_book_message(depth_frame(bids=[["101", "1"]], asks=[["101", "1"]]))
+
+    def test_rest_depth_parsed_with_timestamp(self):
+        snap = parse_depth_rest(
+            {"T": 1234, "bids": [["100", "2"]], "asks": [["101", "1"]]},
+            symbol="AGTUSDT",
+            now_ms=9_999,
+        )
+        assert snap.symbol == "AGTUSDT"
+        assert snap.ts_ms == 1234
+        assert snap.bids == ((100.0, 2.0),)
+
+    def test_rest_depth_uses_now_when_no_timestamp(self):
+        snap = parse_depth_rest(
+            {"bids": [["100", "2"]], "asks": [["101", "1"]]},
+            symbol="AGTUSDT",
+            now_ms=9_999,
+        )
+        assert snap.ts_ms == 9_999
+
+    def test_rest_depth_fails_loud(self):
+        with pytest.raises(BookError):
+            parse_depth_rest([], symbol="AGTUSDT", now_ms=9_999)
+        with pytest.raises(BookError):
+            parse_depth_rest({"bids": [], "asks": []}, symbol="AGTUSDT", now_ms=9_999)
 
 
 class TestBands:

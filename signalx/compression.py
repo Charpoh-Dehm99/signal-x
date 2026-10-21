@@ -51,11 +51,28 @@ def compression_metrics(
     }
 
 
-def momentum_decaying(roc_values: list[float | None], lookback: int = 3) -> bool:
-    """True when recent ROC values are strictly decreasing (deceleration)."""
+def momentum_decay_bias(roc_values: list[float | None], lookback: int = 3) -> str | None:
+    """Direction supported by fading momentum: ``"bear"`` or ``"bull"``.
+
+    Decay means the *magnitude* of recent ROC is strictly shrinking. A fading
+    rally (positive ROC) supports the downside; a fading selloff (negative
+    ROC) supports the upside.
+    """
     if lookback < 2:
         raise ValueError("lookback must be >= 2")
     tail = [v for v in roc_values[-(lookback + 1):] if v is not None]
     if len(tail) < lookback + 1:
-        return False
-    return all(tail[i] > tail[i + 1] for i in range(len(tail) - 1))
+        return None
+    if not all(abs(tail[i]) > abs(tail[i + 1]) for i in range(len(tail) - 1)):
+        return None
+    avg = sum(tail) / len(tail)
+    if avg > 0:
+        return "bear"
+    if avg < 0:
+        return "bull"
+    return None
+
+
+def momentum_decaying(roc_values: list[float | None], lookback: int = 3) -> bool:
+    """True when recent ROC magnitude is strictly decreasing (deceleration)."""
+    return momentum_decay_bias(roc_values, lookback=lookback) is not None

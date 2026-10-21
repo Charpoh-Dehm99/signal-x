@@ -30,10 +30,19 @@ FAKE_SNAP = {
     "rsi": 60.0,
     "has_bearish_div": False,
     "momentum_decay": False,
+    "momentum_decay_bias": None,
     "funding_now": 0.0001,
     "funding_pctile": 99.0,
     "oi_regime": "TREND_FUEL",
     "squeeze_active": False,
+    "flow": {
+        "source": "klines+trades+book",
+        "cvd_ratio": 0.12,
+        "large_print_net_usd": 50000.0,
+        "book_imbalance": 0.3,
+        "fat_money_bias": "bull",
+    },
+    "flow_errors": {},
     "events": [],
     "state": "PUMP",
     "market": "futures",
@@ -307,7 +316,8 @@ class TestSnapshot:
         async def fake_detect(client, symbol):
             return "futures"
 
-        async def fake_poll(client, symbol, market, tf, now_ms):
+        async def fake_poll(client, symbol, market, tf, now_ms, **kw):
+            assert kw.get("include_microstructure") is True
             return FAKE_SNAP
 
         monkeypatch.setattr(server, "detect_market", fake_detect)
@@ -319,13 +329,14 @@ class TestSnapshot:
         assert body["symbol"] == "AAAUSDT"
         assert body["market"] == "futures"
         assert body["state"] == "PUMP"
+        assert body["flow"]["fat_money_bias"] == "bull"
 
     @pytest.mark.anyio
     async def test_snapshot_feed_error_is_502(self, monkeypatch):
         async def fake_detect(client, symbol):
             return "futures"
 
-        async def fake_poll(client, symbol, market, tf, now_ms):
+        async def fake_poll(client, symbol, market, tf, now_ms, **kw):
             raise FeedError("HTTP 400 for /fapi/v1/klines")
 
         monkeypatch.setattr(server, "detect_market", fake_detect)
@@ -339,7 +350,7 @@ class TestSnapshot:
         async def fake_detect(client, symbol):
             return "futures"
 
-        async def fake_poll(client, symbol, market, tf, now_ms):
+        async def fake_poll(client, symbol, market, tf, now_ms, **kw):
             raise LiveError("need >= 50 5m klines")
 
         monkeypatch.setattr(server, "detect_market", fake_detect)
@@ -568,7 +579,7 @@ class TestStream:
         async def fake_detect(client, symbol):
             return "futures"
 
-        async def fake_poll(client, symbol, market, tf, now_ms):
+        async def fake_poll(client, symbol, market, tf, now_ms, **kw):
             calls["n"] += 1
             return FAKE_SNAP | {"price": 1.0 + calls["n"] / 100}
 
@@ -589,7 +600,7 @@ class TestStream:
         async def fake_detect(client, symbol):
             return "futures"
 
-        async def fake_poll(client, symbol, market, tf, now_ms):
+        async def fake_poll(client, symbol, market, tf, now_ms, **kw):
             raise FeedError("boom")
 
         monkeypatch.setattr(server, "detect_market", fake_detect)
@@ -613,7 +624,7 @@ class TestStream:
         async def fake_detect(client, symbol):
             return "futures"
 
-        async def fake_poll(client, symbol, market, tf, now_ms):
+        async def fake_poll(client, symbol, market, tf, now_ms, **kw):
             return snap
 
         monkeypatch.setattr(server, "detect_market", fake_detect)
@@ -766,6 +777,16 @@ class TestSecurityHeaders:
             assert "script-src 'self'" in csp
             assert "frame-ancestors 'none'" in csp
             assert "form-action 'none'" in csp
+        assert api.headers["cache-control"] == "no-store"
+        assert index.headers["cache-control"] == "no-cache"
+
+    @pytest.mark.anyio
+    async def test_static_assets_must_revalidate(self):
+        async with make_client() as c:
+            js = await c.get("/static/chart.js")
+        assert js.status_code == 200
+        assert js.headers["cache-control"] == "no-cache"
+        assert js.headers["etag"]
 
     @pytest.mark.anyio
     async def test_stream_headers_not_duplicated(self, monkeypatch):
@@ -774,7 +795,7 @@ class TestSecurityHeaders:
         async def fake_detect(client, sym):
             return "futures"
 
-        async def fake_poll(client, sym, market, tf, now_ms):
+        async def fake_poll(client, sym, market, tf, now_ms, **kw):
             return json.loads(json.dumps(FAKE_SNAP))
 
         monkeypatch.setattr(server, "detect_market", fake_detect)

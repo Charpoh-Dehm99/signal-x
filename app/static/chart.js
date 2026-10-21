@@ -119,8 +119,9 @@ const ChartX = (() => {
       c.fillStyle = g;
       c.beginPath(); c.arc(S, S, S, 0, Math.PI * 2); c.fill();
     }
+    const r = W < 520 ? 6.5 : S;   // phones: smaller glow so pivots don't swamp candles
     ctx.globalAlpha = 0.72 + 0.28 * ph;
-    ctx.drawImage(dotSprite, x - S, y - S, S * 2, S * 2);
+    ctx.drawImage(dotSprite, x - r, y - r, r * 2, r * 2);
     ctx.globalAlpha = 1;
   }
 
@@ -211,7 +212,10 @@ const ChartX = (() => {
   function draw() {
     if (!ctx) return;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, W, H);
+    /* clear the full backing store: on high-DPI screens W/H are CSS pixels,
+       so clearing W×H left the rest of the canvas uncleared and every redraw
+       stacked translucent fills/labels on top of the previous frame */
+    ctx.clearRect(0, 0, cv.width, cv.height);
     const dpr = window.devicePixelRatio || 1;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.font = "500 10px Manrope, system-ui, sans-serif";
@@ -263,10 +267,15 @@ const ChartX = (() => {
     const lastC = candles[n - 1].c;
     ctx.fillStyle = AXIS;
     ctx.textAlign = "left";
+    let prevLabelY = -Infinity, prevLabelText = "";
     for (let p = Math.ceil(lo / pstep) * pstep; p <= hi; p += pstep) {
       const y = yP(p);
-      if (Math.abs(y - yP(lastC)) < 12) continue;
-      ctx.fillText(fmtP(p), PAD.l + plotW + 8, y);
+      const text = fmtP(p);
+      if (Math.abs(y - yP(lastC)) < 16) continue;   // leave room for the last-price tag
+      if (Math.abs(y - prevLabelY) < 14 || text === prevLabelText) continue;
+      ctx.fillText(text, PAD.l + plotW + 8, y);
+      prevLabelY = y;
+      prevLabelText = text;
     }
     ctx.textAlign = "center";
     for (let k = 0; k <= 5; k++) {
@@ -285,6 +294,44 @@ const ChartX = (() => {
     ctx.save();
     ctx.beginPath(); ctx.rect(PAD.l, g.main.y, plotW, g.main.h); ctx.clip();
 
+    /* every main-pane label is queued and placed once at the end: higher
+       priority wins, colliding labels are dropped instead of stacked on top */
+    const labels = [];
+    const densePlot = plotW < 520;   // phones: fewer labels over the same bars
+    function labelBox(text, tx, ty, align) {
+      ctx.font = "500 10px Manrope, system-ui, sans-serif";
+      const w = ctx.measureText(text).width;
+      const x0 = align === "center" ? tx - w / 2 : align === "right" ? tx - w : tx;
+      return { x0: x0, x1: x0 + w, y0: ty - 9, y1: ty + 3 };
+    }
+    function addLabel(text, tx, ty, color, align, prio) {
+      const b = labelBox(text, tx, ty, align || "left");
+      /* keep labels inside the plot: nudge right-edge text left, then clamp */
+      const minX = PAD.l + 2, maxX = PAD.l + plotW - 2;
+      let dx = 0;
+      if (b.x1 > maxX) dx = maxX - b.x1;
+      if (b.x0 + dx < minX) dx = minX - b.x0;
+      if (dx) { tx += dx; b.x0 += dx; b.x1 += dx; }
+      labels.push(Object.assign({ text: text, tx: tx, ty: ty, color: color || MUTED, align: align || "left", prio: prio || 0 }, b));
+    }
+    function flushLabels() {
+      labels.sort((a, b) => b.prio - a.prio);
+      const placed = [];
+      for (const l of labels) {
+        if (l.x1 < PAD.l + 2 || l.x0 > PAD.l + plotW - 2) continue;
+        if (l.y0 < g.main.y + 1 || l.y1 > g.main.y + g.main.h - 1) continue;
+        const clash = placed.some((r) =>
+          !(l.x1 + 2 < r.x0 || l.x0 - 2 > r.x1 || l.y1 + 1 < r.y0 || l.y0 - 1 > r.y1));
+        if (clash) continue;
+        placed.push(l);
+        ctx.fillStyle = l.color;
+        ctx.textAlign = l.align;
+        ctx.font = "500 10px Manrope, system-ui, sans-serif";
+        ctx.fillText(l.text, l.tx, l.ty);
+      }
+      ctx.textAlign = "left";
+    }
+
     /* ---------------- resistance zones (behind price) */
     if (ov && show.zones && ov.zones) {
       for (const z of ov.zones) {
@@ -299,9 +346,7 @@ const ChartX = (() => {
         ctx.strokeStyle = "rgba(46,139,255," + (0.25 + 0.25 * z.w).toFixed(3) + ")";
         ctx.beginPath(); ctx.moveTo(PAD.l, y1); ctx.lineTo(PAD.l + plotW, y1); ctx.stroke();
         if (y2 - y1 > 15) {
-          ctx.fillStyle = "rgba(46,139,255,.75)";
-          ctx.textAlign = "left";
-          ctx.fillText("zone \u00d7" + z.touches, PAD.l + 6, y1 + 9);
+          addLabel("zone \u00d7" + z.touches, PAD.l + 6, y1 + 9, "rgba(46,139,255,.75)", "left", 2);
         }
       }
     }
@@ -320,9 +365,8 @@ const ChartX = (() => {
         ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
         ctx.setLineDash([]);
         if (y2 - y1 > 16) {
-          ctx.fillStyle = b.qualifies ? GOLD : ORANGE;
-          ctx.textAlign = "left";
-          ctx.fillText("plateau " + b.height_atr.toFixed(1) + "\u00d7ATR \u00b7 " + Math.round(b.containment * 100) + "% in", x1 + 6, y2 - 9);
+          addLabel("plateau " + b.height_atr.toFixed(1) + "\u00d7ATR \u00b7 " + Math.round(b.containment * 100) + "% in",
+            x1 + 6, y2 - 9, b.qualifies ? GOLD : ORANGE, "left", 2);
         }
       }
     }
@@ -362,8 +406,7 @@ const ChartX = (() => {
       if (ai != null && A.line[A.anchor_i] != null) {
         ctx.fillStyle = PURPLE;
         ctx.beginPath(); ctx.arc(x(ai), yP(A.line[A.anchor_i]), 3, 0, Math.PI * 2); ctx.fill();
-        ctx.textAlign = "left";
-        ctx.fillText("AVWAP \u00b7 display", x(ai) + 6, yP(A.line[A.anchor_i]) - 10);
+        addLabel("AVWAP \u00b7 display", x(ai) + 6, yP(A.line[A.anchor_i]) - 10, PURPLE, "left", 1);
       }
     }
 
@@ -501,14 +544,13 @@ const ChartX = (() => {
           ctx.fillStyle = up ? DOWN_L : UP_L;
           ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI * 2); ctx.fill();
         }
-        if (p.x - lastLabelX < 42) continue;   // adaptive density: keep it readable
-        ctx.fillStyle = p.s.label === "HH" || p.s.label === "HL"
-          ? "rgba(20,201,168,.8)"
-          : p.s.label === "LH" || p.s.label === "LL"
-            ? "rgba(255,90,104,.8)"
-            : "rgba(255,255,255,.62)";
-        ctx.textAlign = "center";
-        ctx.fillText(p.s.label, p.x, p.y + (up ? -13 : 15));
+        if (p.x - lastLabelX < (densePlot ? 64 : 42)) continue;   // adaptive density: keep it readable
+        addLabel(p.s.label, p.x, p.y + (up ? -13 : 15),
+          p.s.label === "HH" || p.s.label === "HL"
+            ? "rgba(20,201,168,.8)"
+            : p.s.label === "LH" || p.s.label === "LL"
+              ? "rgba(255,90,104,.8)"
+              : "rgba(255,255,255,.62)", "center", 3);
         lastLabelX = p.x;
       }
     }
@@ -529,8 +571,8 @@ const ChartX = (() => {
     /* ---------------- structure breaks: BOS (continuation) / CHoCH (reversal)
        teal = broke a swing high, red = broke a swing low */
     if (ov && show.bos && ov.breaks) {
-      const placed = []; /* label rects, to stack overlaps instead of printing on top */
-      for (const ev of ov.breaks) {
+      const breaks = densePlot ? ov.breaks.slice(-3) : ov.breaks;
+      for (const ev of breaks) {
         const i0 = oi(ev.swing_i), i1 = oi(ev.break_i);
         if (i0 == null || i1 == null) continue;
         const up = ev.dir === "up";
@@ -552,24 +594,23 @@ const ChartX = (() => {
           ctx.moveTo(x(i1), y); ctx.lineTo(x(i1) - 4, y - 6); ctx.lineTo(x(i1) + 4, y - 6);
         }
         ctx.closePath(); ctx.fill();
-        ctx.textAlign = "left";
         const lx = x(i1) + 6;
-        const tw = ctx.measureText(text).width;
         let ly = up ? y + 18 : y - 12;
         for (let guard = 0; guard < 8; guard++) {
-          const clash = placed.some((r) =>
-            !(lx + tw < r.x0 || lx > r.x1 || ly + 3 < r.y0 || ly - 9 > r.y1));
+          const b = labelBox(text, lx, ly, "left");
+          const clash = labels.some((r) =>
+            !(b.x1 + 2 < r.x0 || b.x0 - 2 > r.x1 || b.y1 + 1 < r.y0 || b.y0 - 1 > r.y1));
           if (!clash) break;
           ly += up ? 13 : -13;
         }
-        placed.push({ x0: lx, x1: lx + tw, y0: ly - 9, y1: ly + 3 });
-        ctx.fillText(text, lx, ly);
+        addLabel(text, lx, ly, up ? UP_L : DOWN_L, "left", 5);
       }
     }
 
     /* ---------------- divergence connectors (red = bearish → short bias, teal = bullish → long bias) */
     if (ov && show.divs && ov.divs) {
-      ov.divs.forEach((d, di) => {
+      const divs = densePlot ? ov.divs.slice(-2) : ov.divs;
+      divs.forEach((d, di) => {
         const i1 = oi(d.p1i), i2 = oi(d.p2i);
         if (i1 == null || i2 == null) return;
         ctx.strokeStyle = "rgba(242,54,69,.9)";
@@ -581,13 +622,12 @@ const ChartX = (() => {
           ctx.fillStyle = DOWN_L;
           ctx.beginPath(); ctx.arc(x(ii), yP(pp), 2.6, 0, Math.PI * 2); ctx.fill();
         }
-        ctx.fillStyle = "rgba(255,90,104,.9)";
-        ctx.textAlign = "center";
-        ctx.fillText("div \u2193 short", x(i2), yP(d.p2p) - 12 - (di % 2) * 13);
+        addLabel("div \u2193 short", x(i2), yP(d.p2p) - 12 - (di % 2) * 13, "rgba(255,90,104,.9)", "center", 4);
       });
     }
     if (ov && show.divs && ov.budivs) {
-      ov.budivs.forEach((d, di) => {
+      const budivs = densePlot ? ov.budivs.slice(-2) : ov.budivs;
+      budivs.forEach((d, di) => {
         const i1 = oi(d.p1i), i2 = oi(d.p2i);
         if (i1 == null || i2 == null) return;
         ctx.strokeStyle = "rgba(20,201,168,.9)";
@@ -599,12 +639,11 @@ const ChartX = (() => {
           ctx.fillStyle = UP_L;
           ctx.beginPath(); ctx.arc(x(ii), yP(pp), 2.6, 0, Math.PI * 2); ctx.fill();
         }
-        ctx.fillStyle = "rgba(20,201,168,.9)";
-        ctx.textAlign = "center";
-        ctx.fillText("div \u2191 long", x(i2), yP(d.p2p) + 20 + (di % 2) * 14);
+        addLabel("div \u2191 long", x(i2), yP(d.p2p) + 20 + (di % 2) * 14, "rgba(20,201,168,.9)", "center", 4);
       });
     }
 
+    flushLabels();
     ctx.restore(); /* end main clip */
 
     /* ---------------- volume pane */
@@ -698,7 +737,8 @@ const ChartX = (() => {
             [ov.divs, "rgba(242,54,69,.75)"],
             [ov.budivs, "rgba(20,201,168,.75)"],
           ]) {
-            for (const d of list || []) {
+            const shown = densePlot ? (list || []).slice(-2) : (list || []);
+            for (const d of shown) {
               const r1 = ov.rsi[d.r1i], r2 = ov.rsi[d.r2i];
               if (r1 == null || r2 == null) continue;
               const i1 = oi(d.r1i), i2 = oi(d.r2i);
@@ -773,9 +813,11 @@ const ChartX = (() => {
       tipEl.classList.remove("show");
     }
 
-    /* keep the dual-layer gold glow pulsing while both overlays are visible */
+    /* keep the dual-layer gold glow pulsing while both overlays are visible;
+       ~11 fps is smooth enough and avoids burning a phone redrawing the
+       whole canvas (and every label) at 60 fps */
     if (!REDUCE_MOTION && !animRaf && candles.length && show.pivots && show.structure) {
-      animRaf = requestAnimationFrame(() => { animRaf = 0; draw(); });
+      animRaf = setTimeout(() => { animRaf = 0; if (!document.hidden) draw(); }, 90);
     }
 
     function tag(tx, ty, text, bg) {
@@ -990,6 +1032,7 @@ const ChartX = (() => {
       if (!drag && e.pointerType !== "touch") { hoverI = null; schedule(); }
     });
     cv.addEventListener("blur", () => { hoverI = null; touches.clear(); pinch = null; schedule(); });
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) schedule(); });
     /* double-click: magnifier-style focus zoom at the pointer (x1.8 per click),
        time-anchored on the pointed candle with the price axis auto-fitting the
        zoomed window; on the price axis it fits, and at the deep-zoom limit too.

@@ -35,11 +35,12 @@ graph LR
   the observation panel, gainers, notifications and sounds. `logo.js` is the
   animated header.
 - **`signalx/`** — the analysis package: feeds/validation, live snapshot,
-  EMA cascade, overlays, journal, universe screening, studies, alerts.
+  EMA cascade, overlays, flow/order-book proxies, journal, universe screening,
+  studies, alerts.
 - **`scripts/`** — long-running workers and research runners (see
   [Workers & scripts](#workers--scripts)).
-- **`tests/`** — 706 pytest tests covering validation, feeds, overlays,
-  studies, the API and the alert redaction layer.
+- **`tests/`** — 741 pytest tests covering validation, feeds, overlays,
+  studies, flow features, the API and the alert redaction layer.
 
 Data is fetched live from public Binance endpoints; nothing is written by the
 web app. The journal and capture data belong to the scripts.
@@ -124,6 +125,7 @@ Useful environment variables:
 | Timeframes | `1m · 5m · 15m · 1h · 4h` |
 | Overlay chips | EMA 8·13·21, swing pivots, structure, BOS/CHoCH, resistance zones, AVWAP, plateau box, divergence, RSI pane — persisted in `localStorage` |
 | Observation panel | Live state badge, events, vol-z/funding/plateau donuts, layers readout (right rail) |
+| Fat money | CVD, taker-buy ratio, large prints, book imbalance and absorption proxies (observation only) |
 | Signals table | Sentinel journal rows, newest first; header shows sentinel heartbeat age (data freshness, never fetch time) and an explicit offline state |
 | Bell | Notification history (persisted, filterable by kind, free-text search, unread tab badge) |
 | Sound | WebAudio chimes for EMA crosses/cascades, top-1% entries, journal signals, hot/warn events; volume slider |
@@ -156,6 +158,7 @@ All scripts are observation/capture tools and share the same feed layer.
 ```bash
 # State-machine journal: transitions + short-signal observations for top gainers
 .venv/bin/python scripts/sentinel.py --top 40 --tf 5m --interval 60
+.venv/bin/python scripts/sentinel.py --top 40 --flow --flow-top 10 --once
 .venv/bin/python scripts/sentinel.py --symbols AGTUSDT,AUSDT --once
 
 # Optional Telegram push on TRIGGERED (requires both env vars; text is redacted)
@@ -221,7 +224,7 @@ redaction in the alert layer.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest -o addopts="" -q   # 706 passed
+.venv/bin/python -m pytest -o addopts="" -q   # 741 passed
 ```
 
 ---

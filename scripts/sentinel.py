@@ -80,15 +80,23 @@ def parse_args(argv=None):
     ap.add_argument("--pump-threshold", type=float, default=0.6,
                     help="state machine pump_score threshold (0, 1]")
     ap.add_argument("--once", action="store_true", help="single sweep, then exit")
+    ap.add_argument("--flow", action="store_true",
+                    help="also fetch agg trades + depth for flow features (2 extra REST calls per symbol)")
+    ap.add_argument("--flow-top", type=int, default=40,
+                    help="with --flow, enrich only the first N symbols [1..500] (default 40)")
     ap.add_argument("--alert", action="store_true",
                     help="Telegram alert on TRIGGERED (needs TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID)")
     return ap.parse_args(argv)
 
 
-async def _one(client, symbol: str, tf: str, now_ms: int, sem: asyncio.Semaphore) -> dict:
+async def _one(
+    client, symbol: str, tf: str, now_ms: int, sem: asyncio.Semaphore, flow: bool
+) -> dict:
     async with sem:
         try:
-            return await poll_snapshot(client, symbol, "futures", tf, now_ms)
+            return await poll_snapshot(
+                client, symbol, "futures", tf, now_ms, include_microstructure=flow
+            )
         except (FeedError, ValidationError, LiveError) as exc:
             return {"symbol": symbol, "error": str(exc)}
 
@@ -106,7 +114,12 @@ async def sweep(
 ) -> tuple[int, int]:
     now_ms = int(time.time() * 1000)
     sem = asyncio.Semaphore(args.workers)
-    snaps = await asyncio.gather(*(_one(client, s, tf, now_ms, sem) for s in symbols))
+    snaps = await asyncio.gather(
+        *(
+            _one(client, s, tf, now_ms, sem, args.flow and i < args.flow_top)
+            for i, s in enumerate(symbols)
+        )
+    )
 
     rows: list[dict] = []
     active = 0
@@ -242,6 +255,8 @@ def main(argv=None) -> int:
             raise ValidationError("--top must be in [1..500]")
         if not (1 <= args.workers <= 32):
             raise ValidationError("--workers must be in [1..32]")
+        if not (1 <= args.flow_top <= 500):
+            raise ValidationError("--flow-top must be in [1..500]")
         if args.interval < MIN_INTERVAL_S:
             raise ValidationError(f"--interval must be >= {MIN_INTERVAL_S:.0f}s")
         if not 0.0 < args.pump_threshold <= 1.0:

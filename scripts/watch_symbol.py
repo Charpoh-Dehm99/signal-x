@@ -79,8 +79,18 @@ def render(snap, market, tf):
         f"  funding {fund_txt} | oi_regime={snap['oi_regime'] or 'n/a'}"
         f" | squeeze={snap['squeeze_active']}"
     )
+    flow = snap.get("flow") or {}
+    line5 = (
+        f"  flow cvd={_fmt(flow.get('cvd_ratio'), '{:+.3f}')}"
+        f" taker={_fmt(flow.get('taker_buy_ratio'), '{:.3f}')}"
+        f" large_n={flow.get('large_print_count') if flow.get('large_print_count') is not None else 'n/a'}"
+        f" large_net={_fmt(flow.get('large_print_net_usd'), '{:+,.0f}')}"
+        f" book={_fmt(flow.get('book_imbalance'), '{:+.3f}')}"
+        f" bias={flow.get('fat_money_bias') or 'n/a'}"
+        f" absorb={flow.get('absorption') or 'n/a'}"
+    )
     events = ", ".join(snap["events"]) if snap["events"] else "-"
-    return "\n".join([head, line2, line3, line4, f"  EVENTS: {events}"])
+    return "\n".join([head, line2, line3, line4, line5, f"  EVENTS: {events}"])
 
 
 def parse_args(argv=None):
@@ -94,6 +104,8 @@ def parse_args(argv=None):
     ap.add_argument("--polls", type=int, default=0, help="0 = poll forever")
     ap.add_argument("--once", action="store_true", help="single snapshot, then exit")
     ap.add_argument("--exit-on-resistance", action="store_true")
+    ap.add_argument("--flow", action="store_true",
+                    help="also fetch agg trades + depth for flow features")
     ap.add_argument("--alert", action="store_true",
                     help="Telegram alert on new events (needs TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID)")
     return ap.parse_args(argv)
@@ -112,7 +124,10 @@ async def watch(args, symbol: str, interval: str, max_polls: int, creds: dict | 
                     market = await detect_market(client, symbol)
                     note = " (no USDT-M perp; spot only)" if market == "spot" else ""
                     print(f"market auto-detected: {market}{note}")
-                snap = await poll_snapshot(client, symbol, market, interval, now_ms)
+                snap = await poll_snapshot(
+                    client, symbol, market, interval, now_ms,
+                    include_microstructure=args.flow,
+                )
             except (FeedError, ValidationError, LiveError) as exc:
                 print(f"ERROR: {exc}")
                 if max_polls == 1:

@@ -140,6 +140,16 @@ def parse_depth_payload(data: dict) -> DepthSnapshot:
     )
 
 
+def parse_depth_rest(payload: object, *, symbol: str, now_ms: int) -> DepthSnapshot:
+    """Parse a REST depth payload (bids/asks keys, optional T/E timestamp)."""
+    if not isinstance(payload, dict):
+        raise BookError("REST depth payload must be a dict")
+    ts = payload.get("T", payload.get("E", now_ms))
+    return parse_depth_payload(
+        {"s": symbol, "T": ts, "b": payload.get("bids"), "a": payload.get("asks")}
+    )
+
+
 def parse_book_message(payload: object):
     """Parse one combined-stream frame. Returns BookTicker, DepthSnapshot or None.
 

@@ -6,6 +6,7 @@ import pytest
 
 import httpx
 
+from signalx.book import DepthSnapshot
 from signalx.feeds import (
     FUTURES_BASE,
     MAX_RESPONSE_BYTES,
@@ -13,6 +14,8 @@ from signalx.feeds import (
     FeedError,
     _get_json,
     detect_market,
+    fetch_agg_trades,
+    fetch_depth,
     fetch_funding,
     fetch_gainers,
     fetch_klines,
@@ -70,6 +73,17 @@ def default_handler(request: httpx.Request) -> httpx.Response:
             {"sumOpenInterest": str(100 + i), "timestamp": NOW - (287 - i) * 300_000}
             for i in range(288)
         ])
+    if path in ("/fapi/v1/aggTrades", "/api/v3/aggTrades"):
+        return httpx.Response(200, json=[
+            {"T": NOW - 3_000 + i, "p": "10.0", "q": "3000.0" if i == 0 else "1.0", "m": False}
+            for i in range(3)
+        ])
+    if path in ("/fapi/v1/depth", "/api/v3/depth"):
+        return httpx.Response(200, json={
+            "T": NOW,
+            "bids": [["100", "5"], ["99", "1"]],
+            "asks": [["101", "1"]],
+        })
     return httpx.Response(404, json={"msg": "unrouted"})
 
 
@@ -188,6 +202,19 @@ class TestFetches:
                 await fetch_gainers(client, top=501)
 
     @pytest.mark.anyio
+    async def test_fetch_agg_trades_and_depth(self):
+        async with mk_client() as client:
+            trades = await fetch_agg_trades(client, "futures", "AAAUSDT")
+            depth = await fetch_depth(client, "futures", "AAAUSDT", now_ms=NOW)
+        assert len(trades) == 3
+        assert trades[0].price == pytest.approx(10.0)
+        assert trades[0].qty == pytest.approx(3000.0)
+        assert isinstance(depth, DepthSnapshot)
+        assert depth.symbol == "AAAUSDT"
+        assert depth.ts_ms == NOW
+        assert depth.bids[0] == (100.0, 5.0)
+
+    @pytest.mark.anyio
     async def test_fetch_funding_and_oi(self):
         async with mk_client() as client:
             now, hist = await fetch_funding(client, "AAAUSDT")
@@ -229,6 +256,36 @@ class TestMarketDetectAndSnapshot:
         assert snap["oi_regime"] is not None
         assert len(snap["closes"]) == len(snap["closes_time"]) == 59
         assert snap["bar_time"] == NOW - 300_000
+
+    @pytest.mark.anyio
+    async def test_poll_snapshot_microstructure_flow(self):
+        async with mk_client() as client:
+            snap = await poll_snapshot(
+                client, "AAAUSDT", "futures", "5m", NOW,
+                include_microstructure=True,
+            )
+        flow = snap["flow"]
+        assert flow["source"] == "klines+trades+book"
+        assert flow["large_print_count"] == 1
+        assert flow["large_print_net_usd"] == pytest.approx(30_000.0)
+        assert flow["book_imbalance"] is not None
+        assert snap["flow_errors"] == {}
+
+    @pytest.mark.anyio
+    async def test_poll_snapshot_microstructure_failure_is_reported(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path in ("/fapi/v1/aggTrades", "/api/v3/aggTrades"):
+                return httpx.Response(400, json={"msg": "nope"})
+            return default_handler(request)
+
+        async with mk_client(handler) as client:
+            snap = await poll_snapshot(
+                client, "AAAUSDT", "futures", "5m", NOW,
+                include_microstructure=True,
+            )
+        assert "agg_trades" in snap["flow_errors"]
+        assert snap["flow"]["source"] == "klines+book"
+        assert snap["flow"]["large_print_count"] is None
 
     @pytest.mark.anyio
     async def test_poll_snapshot_spot_no_funding(self):

@@ -29,7 +29,10 @@ RESTART_GRACE_S = 30.0
 
 # name -> argv (python interpreter + flags are prepended at launch)
 DAEMONS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("sentinel", ("scripts/sentinel.py", "--top", "40", "--interval", "60", "--alert")),
+    ("sentinel", (
+        "scripts/sentinel.py", "--top", "40", "--interval", "60", "--alert",
+        "--flow", "--flow-top", "10",
+    )),
     ("recorder", ("scripts/recorder.py", "--top", "40", "--tf", "1m", "--interval", "60")),
     ("stream", ("scripts/stream.py", "--top", "10", "--min-notional", "25000")),
     ("book", ("scripts/book.py", "--top", "40")),

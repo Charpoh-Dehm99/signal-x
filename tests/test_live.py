@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import pytest
 
+from signalx.book import DepthSnapshot
 from signalx.live import LiveError, live_snapshot, volume_z
-from signalx.models import Pivot
+from signalx.models import AggTrade, Pivot
 from tests.helpers import MIN_MS, START_MS, mk_kline, series_from_closes
 
 MS5 = 300_000
@@ -242,7 +243,38 @@ class TestSnapshot:
             closes.append(closes[-1] + s)
         snap = live_snapshot(symbol="TESTUSDT", klines5m=bars(closes))
         assert snap["momentum_decay"] is True
+        assert snap["momentum_decay_bias"] == "bear"
         assert "MOMENTUM_DECAY" in snap["events"]
+
+    def test_momentum_decay_supports_long_when_selloff_fades(self):
+        steps = [-10.0 * (0.9 ** i) for i in range(89)]
+        closes = [1000.0]
+        for s in steps:
+            closes.append(closes[-1] + s)
+        snap = live_snapshot(symbol="TESTUSDT", klines5m=bars(closes))
+        assert snap["momentum_decay"] is True
+        assert snap["momentum_decay_bias"] == "bull"
+        assert "MOMENTUM_DECAY" in snap["events"]
+
+    def test_flow_from_klines_is_always_present(self):
+        snap = live_snapshot(symbol="TESTUSDT", klines5m=flat(90))
+        assert snap["flow"]["source"] == "klines"
+        assert snap["flow"]["cvd_ratio"] == pytest.approx(0.0)
+        assert snap["flow"]["large_print_count"] is None
+
+    def test_flow_microstructure_enrichment(self):
+        depth = DepthSnapshot(
+            "TESTUSDT", 1, ((100.0, 5.0),), ((101.0, 1.0),)
+        )
+        snap = live_snapshot(
+            symbol="TESTUSDT",
+            klines5m=flat(90),
+            agg_trades=[AggTrade(1, 100.0, 300.0, False)],
+            depth_snapshot=depth,
+        )
+        assert snap["flow"]["source"] == "klines+trades+book"
+        assert snap["flow"]["large_print_count"] == 1
+        assert snap["flow"]["book_imbalance"] is not None
 
 
 # --------------------------------------------------- swing_high / vol_ratio

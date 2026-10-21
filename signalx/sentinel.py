@@ -115,7 +115,10 @@ def features_from_snapshot(
     return {
         "pump_score": pump_score(snap.get("change_24h_pct"), snap.get("vol_z")),
         "compression_qualifies": bool(isinstance(cm, dict) and cm.get("qualifies")),
-        "momentum_decaying": bool(snap.get("momentum_decay")),
+        "momentum_decaying": (
+            bool(snap.get("momentum_decay"))
+            and snap.get("momentum_decay_bias") != "bull"
+        ),
         "invalidation": bool(
             swing_high is not None and price > swing_high + stop_buffer_atr * atr
         ),
@@ -132,6 +135,7 @@ def features_from_snapshot(
             vol_ratio is not None and vol_ratio >= volume_mult
         ),
         "trade_closed": bool(snap.get("trade_closed")),
+        "flow": snap.get("flow"),
     }
 
 

@@ -27,7 +27,12 @@ const EVENT_TEXT = {
   MOMENTUM_DECAY: "Momentum decaying",
   FUNDING_EXTREME: "Funding extreme",
 };
-const eventText = (e) => EVENT_TEXT[e] || e;
+const eventText = (e, s) => {
+  if (e === "MOMENTUM_DECAY" && s && s.momentum_decay_bias) {
+    return "Momentum decay \u2192 " + (s.momentum_decay_bias === "bull" ? "LONG bias" : "SHORT bias");
+  }
+  return EVENT_TEXT[e] || e;
+};
 const ST_ABBR = { TRIGGERED: "TRIG", IN_TRADE: "TRADE", ARMED: "ARM", PLATEAU_BUILDING: "PLAT", PUMP_DETECTED: "PUMP" };
 
 const state = {
@@ -351,6 +356,10 @@ function fmtQv(v) {
   if (v >= 1e3) return "$" + (v / 1e3).toFixed(0) + "K";
   return "$" + v.toFixed(0);
 }
+function fmtSignedQv(v) {
+  if (v == null || !isFinite(v)) return "\u2014";
+  return (v >= 0 ? "+" : "-") + fmtQv(Math.abs(v));
+}
 function cell(label, value, cls) {
   return '<div class="cell"><div class="k">' + label + '</div><div class="v ' + (cls || "") + '">' + value + "</div></div>";
 }
@@ -589,6 +598,10 @@ function renderObservation(s) {
 
   const cm = s.compression;
   const r = s.resistance;
+  const decay = s.momentum_decay
+    ? (s.momentum_decay_bias === "bull" ? "decay\u2191 long"
+      : s.momentum_decay_bias === "bear" ? "decay\u2193 short" : "decay")
+    : "flat";
   $("meta").innerHTML = [
     cell("vol z (1h)", s.vol_z == null ? "\u2014" : s.vol_z.toFixed(1), s.vol_z >= 3 ? "warn" : ""),
     cell("plateau", cm ? "h/atr " + cm.height_atr.toFixed(1) + " \u00b7 " + (cm.containment * 100).toFixed(0) + "%" : "\u2014",
@@ -604,8 +617,9 @@ function renderObservation(s) {
     cell("RSI \u00b7 div \u00b7 decay",
       (s.rsi == null ? "\u2014" : s.rsi.toFixed(0)) +
         " \u00b7 " + (s.has_bearish_div ? "bear\u2193 short" : s.has_bullish_div ? "bull\u2191 long" : "no div") +
-        " \u00b7 " + (s.momentum_decay ? "decay" : "flat"),
-      s.has_bearish_div ? "warn" : ""),
+        " \u00b7 " + decay,
+      s.has_bearish_div || s.momentum_decay_bias === "bear" ? "warn"
+        : s.momentum_decay_bias === "bull" ? "ok" : ""),
     cell("funding", s.funding_now == null ? "n/a (spot)"
       : (s.funding_now * 100).toFixed(4) + "% \u00b7 p" + (s.funding_pctile == null ? "\u2014" : Math.round(s.funding_pctile)),
       s.funding_pctile >= 90 ? "hot" : ""),
@@ -614,12 +628,49 @@ function renderObservation(s) {
     cell("zones", String(s.n_zones)),
   ].join("");
 
+  const fl = s.flow || {};
+  const flowMeta = $("flow-meta");
+  if (flowMeta) {
+    const cvd = fl.cvd_ratio;
+    const lp = fl.large_print_net_usd;
+    const book = fl.book_imbalance;
+    flowMeta.innerHTML = [
+      cell("CVD 12b",
+        cvd == null ? "\u2014" : (cvd >= 0 ? "+" : "") + (cvd * 100).toFixed(1) + "% \u00b7 " + fmtSignedQv(fl.cvd_net_quote),
+        cvd == null ? "" : cvd >= 0.05 ? "ok" : cvd <= -0.05 ? "warn" : ""),
+      cell("taker buy", fl.taker_buy_ratio == null ? "\u2014" : (fl.taker_buy_ratio * 100).toFixed(1) + "%",
+        fl.taker_buy_ratio == null ? "" : fl.taker_buy_ratio >= 0.55 ? "ok" : fl.taker_buy_ratio <= 0.45 ? "warn" : ""),
+      cell("large prints",
+        fl.large_print_count == null ? "n/a" : fl.large_print_count + " \u00b7 " + fmtSignedQv(lp),
+        lp == null ? "" : lp > 0 ? "ok" : lp < 0 ? "warn" : ""),
+      cell("book", book == null ? "n/a" : (book * 100).toFixed(0) + "% bid",
+        book == null ? "" : book >= 0.2 ? "ok" : book <= -0.2 ? "warn" : ""),
+      cell("flow bias", fl.fat_money_bias ? esc(fl.fat_money_bias) : "\u2014",
+        fl.fat_money_bias === "bull" ? "ok" : fl.fat_money_bias === "bear" ? "warn" : ""),
+      cell("absorption", fl.absorption ? esc(fl.absorption) : "\u2014",
+        fl.absorption === "accumulation" ? "ok" : fl.absorption === "distribution" ? "warn" : ""),
+    ].join("");
+  }
+  const flowNote = $("flow-note");
+  if (flowNote) {
+    const errs = Object.keys(s.flow_errors || {});
+    const minUsd = fl.large_print_min_usd == null ? 25_000 : fl.large_print_min_usd;
+    const bandPct = fl.book_band_pct == null ? 0.5 : fl.book_band_pct;
+    flowNote.textContent = errs.length
+      ? "partial flow: " + errs.join(", ") + " unavailable"
+      : "CVD = taker delta \u00b7 large prints per-trade \u2265 " + fmtQv(minUsd) +
+        " \u00b7 book band \u00b1 " + bandPct + "%";
+  }
+
   const chips = $("events");
   chips.innerHTML = !s.events || !s.events.length
     ? '<span class="ev">no events</span>'
     : s.events.map((e) => {
-        const cls = HOT_EVENTS.has(e) ? "hot" : WARN_EVENTS.has(e) ? "warn" : "ok";
-        return '<span class="ev ' + cls + '">' + esc(e) + "</span>";
+        const cls = e === "MOMENTUM_DECAY" && s.momentum_decay_bias === "bull"
+          ? "ok"
+          : HOT_EVENTS.has(e) ? "hot" : WARN_EVENTS.has(e) ? "warn" : "ok";
+        const label = e === "MOMENTUM_DECAY" ? eventText(e, s) : e;
+        return '<span class="ev ' + cls + '">' + esc(label) + "</span>";
       }).join("");
 
   /* chime for newly appeared critical / warning events (first snapshot seeds silently) */
@@ -627,8 +678,8 @@ function renderObservation(s) {
   if (prevEvents) {
     for (const e of evSet) {
       if (prevEvents.has(e)) continue;
-      if (HOT_EVENTS.has(e)) Sound.play("hot", e, { sym: state.sym, msg: eventText(e) });
-      else if (WARN_EVENTS.has(e)) Sound.play("warn", e, { sym: state.sym, msg: eventText(e) });
+      if (HOT_EVENTS.has(e)) Sound.play("hot", e, { sym: state.sym, msg: eventText(e, s) });
+      else if (WARN_EVENTS.has(e)) Sound.play("warn", e, { sym: state.sym, msg: eventText(e, s) });
     }
   }
   prevEvents = evSet;

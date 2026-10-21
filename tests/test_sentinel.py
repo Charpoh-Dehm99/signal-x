@@ -35,6 +35,7 @@ def snap(**over):
         "bos_down": False,
         "has_bearish_div": False,
         "momentum_decay": False,
+        "momentum_decay_bias": None,
         "funding_pctile": None,
         "squeeze_active": None,
         "vol_ratio": 1.0,
@@ -95,6 +96,12 @@ class TestFeatures:
         assert features_from_snapshot(snap(vol_ratio=1.5))["breakout_volume_ok"] is True
         assert features_from_snapshot(snap(vol_ratio=1.49))["breakout_volume_ok"] is False
 
+    def test_momentum_decay_bias_gates_plateau(self):
+        bear = snap(momentum_decay=True, momentum_decay_bias="bear")
+        bull = snap(momentum_decay=True, momentum_decay_bias="bull")
+        assert features_from_snapshot(bear)["momentum_decaying"] is True
+        assert features_from_snapshot(bull)["momentum_decaying"] is False
+
     def test_invalidation_above_swing_high_buffer(self):
         assert features_from_snapshot(snap(price=101.6, swing_high=101.0))["invalidation"] is True
         assert features_from_snapshot(snap(price=101.4, swing_high=101.0))["invalidation"] is False
@@ -109,6 +116,11 @@ class TestFeatures:
     def test_near_resistance_from_events(self):
         assert features_from_snapshot(snap(events=["NEAR_RESISTANCE"]))["near_resistance"] is True
         assert features_from_snapshot(snap(events=["BOS_DOWN"]))["near_resistance"] is False
+
+    def test_flow_passthrough(self):
+        flow = {"cvd_ratio": 0.2, "fat_money_bias": "bull"}
+        assert features_from_snapshot(snap(flow=flow))["flow"] == flow
+        assert features_from_snapshot(snap())["flow"] is None
 
 
 # ------------------------------------------------------------- trigger_plan

@@ -14,15 +14,17 @@ from __future__ import annotations
 
 from bisect import bisect_right
 
-from .compression import compression_metrics, momentum_decaying
+from .book import DepthSnapshot
+from .compression import compression_metrics, momentum_decay_bias
 from .divergence import (
     find_bearish_divergences,
     find_bullish_divergences,
     rsi_high_pivots,
     rsi_low_pivots,
 )
+from .flow import DEFAULT_FLOW_WINDOW, DEFAULT_LARGE_PRINT_USD, FlowError, flow_features
 from .indicators import atr, pct_rank, roc, rsi
-from .models import Kline
+from .models import AggTrade, Kline
 from .orderflow import oi_price_regime, squeeze_guard
 from .pivots import fractal_pivots, last_swing
 from .resistance import cluster_zones, distance_atr, nearest_resistance_zone
@@ -102,6 +104,10 @@ def live_snapshot(
     z_min_periods: int = 120,
     near_resistance_atr: float = 0.5,
     squeeze_funding_pctile: float = 90.0,
+    agg_trades: list[AggTrade] | None = None,
+    depth_snapshot: DepthSnapshot | None = None,
+    flow_window: int = DEFAULT_FLOW_WINDOW,
+    large_print_min_notional: float = DEFAULT_LARGE_PRINT_USD,
 ) -> dict:
     """Compose all engines into one observation snapshot (see module docstring)."""
     if len(klines5m) < 50:
@@ -160,6 +166,17 @@ def live_snapshot(
         if mean_base > 0:
             vol_ratio = klines5m[-1].volume / mean_base
 
+    try:
+        flow = flow_features(
+            klines5m,
+            agg_trades=agg_trades,
+            depth=depth_snapshot,
+            window=flow_window,
+            min_notional=large_print_min_notional,
+        )
+    except FlowError as exc:
+        raise LiveError(str(exc)) from exc
+
     # --- momentum / divergence ---------------------------------------------
     rsi_vals = rsi(closes, 14)
     rsi_last = _last_defined(rsi_vals)
@@ -177,7 +194,8 @@ def live_snapshot(
             has_div = False
         else:
             has_budiv = False
-    momentum_decay = momentum_decaying(roc(closes, 12), lookback=3)
+    decay_bias = momentum_decay_bias(roc(closes, 12), lookback=3)
+    momentum_decay = decay_bias is not None
 
     # --- futures context (optional) ----------------------------------------
     funding_pctile = None
@@ -272,10 +290,12 @@ def live_snapshot(
         "bullish_div_age": bull_age,
         "divergence_max_age_bars": divergence_max_age_bars,
         "momentum_decay": momentum_decay,
+        "momentum_decay_bias": decay_bias,
         "funding_now": funding_now,
         "funding_pctile": funding_pctile,
         "oi_regime": oi_regime,
         "squeeze_active": squeeze_active,
+        "flow": flow,
         "events": events,
         "state": state,
     }

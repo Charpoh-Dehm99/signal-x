@@ -77,6 +77,16 @@ def test_stream_rejects_negative_min_notional(scripts):
     assert scripts["stream"].main(["--top", "1", "--min-notional", "-1"]) == 2
 
 
+def test_sentinel_accepts_flow_flag(scripts):
+    args = scripts["sentinel"].parse_args(["--flow", "--flow-top", "10"])
+    assert args.flow is True
+    assert args.flow_top == 10
+
+
+def test_sentinel_rejects_bad_flow_top(scripts):
+    assert scripts["sentinel"].main(["--top", "1", "--flow-top", "0"]) == 2
+
+
 def test_book_rejects_short_flush(scripts):
     assert scripts["book"].main(["--top", "1", "--flush", "1"]) == 2
 

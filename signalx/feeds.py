@@ -9,8 +9,16 @@ from __future__ import annotations
 
 import httpx
 
+from .book import BookError, DepthSnapshot, parse_depth_rest
 from .live import live_snapshot
-from .validation import ValidationError, _strict_float, parse_kline_row, validate_interval
+from .models import AggTrade
+from .validation import (
+    ValidationError,
+    _strict_float,
+    parse_agg_trade,
+    parse_kline_row,
+    validate_interval,
+)
 
 SPOT_BASE = "https://api.binance.com"
 FUTURES_BASE = "https://fapi.binance.com"
@@ -27,6 +35,8 @@ TF_MS = {
 }
 OI_PERIODS = {"5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"}
 KLINES_LIMIT = 500
+AGG_TRADES_LIMIT = 1000
+DEPTH_LIMIT = 20
 FUNDING_HISTORY = 90
 OI_HISTORY = 288
 SPARK_CLOSES = 120
@@ -135,6 +145,52 @@ async def fetch_klines(
     if min_closed and len(klines) < min_closed:
         raise FeedError("too few closed klines")
     return klines
+
+
+async def fetch_agg_trades(
+    client: httpx.AsyncClient,
+    market: str,
+    symbol: str,
+    *,
+    limit: int = AGG_TRADES_LIMIT,
+) -> list[AggTrade]:
+    """Recent agg trades (newest last) for flow / large-print features."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or not (1 <= limit <= 1000):
+        raise FeedError("aggTrades limit must be in [1, 1000]")
+    base, prefix = _base_prefix(market)
+    rows = await _get_json(
+        client, base, f"{prefix}/aggTrades", {"symbol": symbol, "limit": limit}
+    )
+    if not isinstance(rows, list):
+        raise FeedError("malformed aggTrades payload")
+    out: list[AggTrade] = []
+    for row in rows:
+        try:
+            out.append(parse_agg_trade(row))
+        except ValidationError as exc:
+            raise FeedError(str(exc)) from exc
+    return out
+
+
+async def fetch_depth(
+    client: httpx.AsyncClient,
+    market: str,
+    symbol: str,
+    *,
+    now_ms: int,
+    limit: int = DEPTH_LIMIT,
+) -> DepthSnapshot:
+    """Top-N order-book snapshot for resting-liquidity features."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or not (1 <= limit <= 1000):
+        raise FeedError("depth limit must be in [1, 1000]")
+    base, prefix = _base_prefix(market)
+    payload = await _get_json(
+        client, base, f"{prefix}/depth", {"symbol": symbol, "limit": limit}
+    )
+    try:
+        return parse_depth_rest(payload, symbol=symbol, now_ms=now_ms)
+    except BookError as exc:
+        raise FeedError(str(exc)) from exc
 
 
 async def fetch_ticker(client: httpx.AsyncClient, market: str, symbol: str) -> float:
@@ -246,10 +302,15 @@ async def poll_snapshot(
     now_ms: int,
     *,
     spark_closes: int = SPARK_CLOSES,
+    include_microstructure: bool = False,
 ) -> dict:
     """One full observation snapshot (same shape as signalx.live.live_snapshot).
 
     Adds `closes` + `closes_time` (recent tf closes for charting) and `market`.
+    With `include_microstructure`, also fetches recent agg trades and a depth
+    snapshot for flow / large-print / book features. Those two calls are
+    optional enrichment: a failure is reported in `flow_errors` instead of
+    failing the whole snapshot.
     """
     klines = await fetch_klines(client, market, symbol, tf, now_ms)
     hourly = await fetch_klines(client, market, symbol, "1h", now_ms)
@@ -262,6 +323,19 @@ async def poll_snapshot(
             client, symbol, tf if tf in OI_PERIODS else "5m", with_times=True
         )
 
+    agg_trades = None
+    depth = None
+    flow_errors: dict[str, str] = {}
+    if include_microstructure:
+        try:
+            agg_trades = await fetch_agg_trades(client, market, symbol)
+        except FeedError as exc:
+            flow_errors["agg_trades"] = str(exc)[:160]
+        try:
+            depth = await fetch_depth(client, market, symbol, now_ms=now_ms)
+        except FeedError as exc:
+            flow_errors["depth"] = str(exc)[:160]
+
     snap = live_snapshot(
         symbol=symbol,
         klines5m=klines,
@@ -272,6 +346,8 @@ async def poll_snapshot(
         oi_now=oi_now,
         oi_history=oi_hist,
         oi_times=oi_times,
+        agg_trades=agg_trades,
+        depth_snapshot=depth,
     )
     snap["bar_time"] = klines[-1].open_time
     tail = klines[-spark_closes:]
@@ -279,4 +355,5 @@ async def poll_snapshot(
     snap["tf"] = tf
     snap["closes"] = [k.close for k in tail]
     snap["closes_time"] = [k.open_time for k in tail]
+    snap["flow_errors"] = flow_errors
     return snap

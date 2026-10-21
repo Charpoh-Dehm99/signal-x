@@ -129,6 +129,15 @@ class SecHeadersMiddleware:
             if message["type"] == "http.response.start":
                 headers = list(message.get("headers") or [])
                 present = {k.lower() for k, _ in headers}
+                path = scope.get("path", "")
+                # Localhost tool: never let an edited asset hide behind a
+                # heuristic cache on mobile (stale chart.js caused stacked
+                # candles on Android). Revalidate assets, never cache API data.
+                if path == "/" or path.startswith("/static/"):
+                    if b"cache-control" not in present:
+                        headers.append((b"cache-control", b"no-cache"))
+                elif path.startswith("/api/") and b"cache-control" not in present:
+                    headers.append((b"cache-control", b"no-store"))
                 for k, v in self._ENCODED:
                     if k.lower() not in present:
                         headers.append((k, v))
@@ -365,7 +374,10 @@ async def snapshot(
     try:
         if market == "auto":
             market = await detect_market(client, sym)
-        return await poll_snapshot(client, sym, market, tf, int(time.time() * 1000))
+        return await poll_snapshot(
+            client, sym, market, tf, int(time.time() * 1000),
+            include_microstructure=True,
+        )
     except (FeedError, LiveError, ValidationError) as exc:
         raise _map_error(exc) from exc
 
@@ -526,7 +538,10 @@ async def stream(
             try:
                 if mkt == "auto":
                     mkt = await detect_market(client, sym)
-                snap = await poll_snapshot(client, sym, mkt, tf, int(time.time() * 1000))
+                snap = await poll_snapshot(
+                    client, sym, mkt, tf, int(time.time() * 1000),
+                    include_microstructure=True,
+                )
                 payload = {"ok": True, "snapshot": _jsonable(snap)}
             except (FeedError, LiveError, ValidationError) as exc:
                 payload = {"ok": False, "error": str(exc)[:300]}

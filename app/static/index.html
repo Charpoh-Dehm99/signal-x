@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#000000">
 <title>SIGNAL-X · charts</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css?v=20261020f">
 </head>
 <body>
 
@@ -46,6 +46,10 @@
     <div class="card">
       <div class="card-head"><h3>Futures gainers<small>24h</small></h3><span class="muted small" id="gainers-upd">&mdash;</span></div>
       <ul id="gainers" class="gainers"><li class="empty">loading&hellip;</li></ul>
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Layers now<small>from the loaded chart</small></h3></div>
+      <div class="meta" id="layers"></div>
     </div>
   </aside>
 
@@ -141,8 +145,9 @@
       <div class="muted small" id="stream-status" style="margin-top:12px">&nbsp;</div>
     </div>
     <div class="card">
-      <div class="card-head"><h3>Layers now<small>from the loaded chart</small></h3></div>
-      <div class="meta" id="layers"></div>
+      <div class="card-head"><h3>Fat money<small>flow proxies</small></h3></div>
+      <div class="meta" id="flow-meta"><span class="muted small">waiting for snapshot&hellip;</span></div>
+      <div class="muted small" id="flow-note" style="margin-top:6px">CVD = taker delta &middot; large prints per-trade &ge; $25k &middot; book band &plusmn;0.5%</div>
     </div>
     <div class="card">
       <div class="card-head"><h3>EMA cascade<small>8 / 13 / 21 &middot; 5m &rarr; 4h</small></h3><span class="muted small" id="ema-upd">&mdash;</span></div>
@@ -172,8 +177,8 @@
   </div>
 </section>
 
-<script src="/static/chart.js"></script>
-<script src="/static/logo.js"></script>
-<script src="/static/app.js"></script>
+<script src="/static/chart.js?v=20261020f"></script>
+<script src="/static/logo.js?v=20261020f"></script>
+<script src="/static/app.js?v=20261020f"></script>
 </body>
 </html>
