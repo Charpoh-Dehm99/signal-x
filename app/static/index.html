@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#000000">
-<title>SIGNAL-X · charts</title>
-<link rel="stylesheet" href="/static/style.css?v=20261020f">
+<title>SIGNAL-X · charts + observation lab</title>
+<link rel="stylesheet" href="/static/style.css?v=20261022d">
 </head>
 <body>
 
@@ -13,6 +13,9 @@
   <div class="brand"><canvas id="logo" class="brand-logo" role="img" aria-label="SIGNAL-X — click to fire" title="SIGNAL-X — click to fire"></canvas></div>
   <div class="top-right">
     <span class="warn-pill" title="G0 full-universe rerun killed 2026-10-17: no validated edge. Charts and algorithm layers are observations, not trade signals.">observation only · G0 killed</span>
+    <button id="chat-toggle" class="sound-btn chat-btn" aria-label="Trading partner" aria-expanded="false" aria-controls="chat-panel" title="Trading partner — read this chart with the selected Ollama model (c)">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-8.5 8.3 9 9 0 0 1-3.5-.7L4 21l1.4-4.3a8.1 8.1 0 0 1-1.9-5.2A8.4 8.4 0 0 1 12 3.2a8.4 8.4 0 0 1 9 8.3Z"/><path d="M8.5 12h.01M12 12h.01M15.5 12h.01"/></svg>
+    </button>
     <button id="notify" class="sound-btn notify-btn" aria-label="Notifications" title="Notifications (n) — every alert that chimes lands here"></button>
     <input id="vol" class="vol" type="range" min="0" max="100" step="1" aria-label="Alert volume" title="Alert volume — release for a preview chime">
     <button id="sound" class="sound-btn" aria-label="Alert sounds" title="Alert sounds: EMA crosses and cascades on the chart, top 1% gainer entries, journal signals, hot/warn observation events"></button>
@@ -144,6 +147,33 @@
       <div class="meta" id="meta"></div>
       <div class="muted small" id="stream-status" style="margin-top:12px">&nbsp;</div>
     </div>
+    <div class="card sniper-card">
+      <div class="card-head"><h3>SNIPER V3<small>1H &rarr; 15m &rarr; 5m</small></h3><span id="sniper-badge" class="badge WATCH">&mdash;</span></div>
+      <div class="sniper-assign">
+        <input id="sniper-symbol" type="text" maxlength="20" autocomplete="off" spellcheck="false"
+               placeholder="coin, e.g. BTCUSDT" aria-label="Coin to assign to SNIPER V3">
+        <button id="sniper-assign" class="sniper-btn sniper-assign-btn" type="button"
+                title="Assign this coin; the monitor evaluates it on closed 5m bars">ASSIGN</button>
+      </div>
+      <div class="sniper-watch-head"><span>ASSIGNED</span><span id="sniper-watch-state" class="muted small">loading&hellip;</span></div>
+      <div class="sniper-watchlist" id="sniper-watchlist"><div class="muted small">none assigned</div></div>
+      <div class="sniper-notify-row">
+        <button id="sniper-notify" class="sniper-notify-btn" type="button" aria-pressed="false"
+                title="Notify when an assigned coin flips to LONG or SHORT">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 4.2a4.8 4.8 0 0 0-4.8 4.8v3.1L5.9 14.9h12.2l-1.3-2.8V9A4.8 4.8 0 0 0 12 4.2z"/>
+            <path d="M10.2 17.6a1.9 1.9 0 0 0 3.6 0"/>
+          </svg>
+          <span id="sniper-notify-label">NOTIFY OFF</span>
+        </button>
+        <span id="sniper-notify-hint" class="muted small">new setup alerts</span>
+      </div>
+      <div class="sniper-divider"></div>
+      <div class="meta sniper-meta" id="sniper-meta"><span class="muted small">waiting for chart&hellip;</span></div>
+      <div class="sniper-reasons muted small" id="sniper-reasons"></div>
+      <button id="sniper-refresh" class="sniper-btn" type="button" title="Evaluate the loaded symbol on closed 1H / 15m / 5m candles">EVALUATE LOADED</button>
+      <div class="muted small sniper-note">Monitor runs on closed 5m bars &middot; observation only &middot; no orders</div>
+    </div>
     <div class="card">
       <div class="card-head"><h3>Fat money<small>flow proxies</small></h3></div>
       <div class="meta" id="flow-meta"><span class="muted small">waiting for snapshot&hellip;</span></div>
@@ -177,8 +207,64 @@
   </div>
 </section>
 
-<script src="/static/chart.js?v=20261020f"></script>
-<script src="/static/logo.js?v=20261020f"></script>
-<script src="/static/app.js?v=20261020f"></script>
+<!-- ------------------------------------------------ paper companion -->
+<section class="paper-wrap">
+  <div class="card paper-panel">
+    <div class="card-head">
+      <div><h3>Paper companion<small>simulated fills &middot; no exchange orders</small></h3></div>
+      <span id="paper-mode" class="badge WATCH">PAPER</span>
+    </div>
+    <div id="paper-summary" class="paper-summary">
+      <div class="cell"><div class="k">Equity</div><div class="v">&mdash;</div></div>
+      <div class="cell"><div class="k">Realized</div><div class="v">&mdash;</div></div>
+      <div class="cell"><div class="k">Unrealized</div><div class="v">&mdash;</div></div>
+      <div class="cell"><div class="k">Open risk</div><div class="v">&mdash;</div></div>
+    </div>
+    <div id="paper-positions"><div class="muted small">waiting for companion state&hellip;</div></div>
+    <div class="paper-foot">
+      <span id="paper-heartbeat" class="muted small">companion offline</span>
+      <button id="paper-halt" class="paper-halt" type="button" title="Create the kill-switch file; blocks new paper entries. Open paper positions still manage to stop/target.">HALT ENTRIES</button>
+    </div>
+    <div class="muted small" style="margin-top:8px">Paper-only: latest price &plusmn; slippage, taker fees, stop/TP1/TP2 and a daily-loss halt. Start <code>scripts/companion.py</code>. No keys, no live orders.</div>
+  </div>
+</section>
+
+
+<div id="chat-scrim" class="chat-scrim" hidden></div>
+<aside id="chat-panel" class="chat-panel" hidden aria-label="SIGNAL-X trading partner">
+  <div class="chat-head">
+    <div class="chat-title">
+      <b>Trading partner</b>
+      <small id="chat-context">load a chart to begin</small>
+    </div>
+    <div class="chat-head-actions">
+      <input id="chat-model" class="chat-model-input" list="chat-model-list"
+        value="minimax-m3.1-flash" maxlength="120" spellcheck="false" autocomplete="off"
+        aria-label="Ollama Cloud model" title="Type or choose an Ollama model, then press Enter">
+      <datalist id="chat-model-list"></datalist>
+      <button id="chat-clear" class="chat-icon" type="button" title="Clear conversation" aria-label="Clear conversation">&#8635;</button>
+      <button id="chat-close" class="chat-icon" type="button" title="Close (Esc)" aria-label="Close trading partner">&times;</button>
+    </div>
+  </div>
+  <div id="chat-status" class="chat-status">checking Ollama Cloud&hellip;</div>
+  <div id="chat-log" class="chat-log" role="log" aria-live="polite" aria-relevant="additions">
+    <div class="chat-empty" id="chat-empty">
+      Ask me about the loaded chart. I read structure, patterns, EMA alignment,
+      RSI/divergence, volume, funding/OI and order flow &mdash; with exact levels and invalidation.
+    </div>
+  </div>
+  <div id="chat-suggest" class="chat-suggest" role="group" aria-label="Suggested questions"></div>
+  <form id="chat-form" class="chat-form" autocomplete="off">
+    <textarea id="chat-input" class="chat-input" rows="2" maxlength="4000" spellcheck="false"
+      placeholder="Ask your trading partner&hellip;" aria-label="Ask your trading partner"></textarea>
+    <button id="chat-send" class="chat-send" type="submit">Ask</button>
+  </form>
+  <div class="chat-foot" id="chat-foot">SIGNAL-X trading partner &middot; Ollama Cloud &middot; observation only, not financial advice</div>
+</aside>
+
+<script src="/static/chat.js?v=20261021h"></script>
+<script src="/static/chart.js?v=20261021h"></script>
+<script src="/static/logo.js?v=20261021h"></script>
+<script src="/static/app.js?v=20261022d"></script>
 </body>
 </html>

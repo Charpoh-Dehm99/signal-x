@@ -18,6 +18,7 @@ from .validation import (
     parse_agg_trade,
     parse_kline_row,
     validate_interval,
+    validate_symbol,
 )
 
 SPOT_BASE = "https://api.binance.com"
@@ -199,6 +200,19 @@ async def fetch_ticker(client: httpx.AsyncClient, market: str, symbol: str) -> f
     if not isinstance(payload, dict):
         raise FeedError("malformed ticker payload")
     return _num(payload.get("priceChangePercent"), "priceChangePercent")
+
+
+async def fetch_price(client: httpx.AsyncClient, market: str, symbol: str) -> float:
+    """Last traded price for one symbol (lightweight paper-companion poll)."""
+    try:
+        sym = validate_symbol(symbol)
+    except ValidationError as exc:
+        raise FeedError(str(exc)) from exc
+    base, prefix = _base_prefix(market)
+    payload = await _get_json(client, base, f"{prefix}/ticker/price", {"symbol": sym})
+    if not isinstance(payload, dict):
+        raise FeedError("malformed ticker price payload")
+    return _num(payload.get("price"), "price")
 
 
 async def fetch_gainers(

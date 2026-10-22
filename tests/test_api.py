@@ -12,6 +12,7 @@ from signalx.feeds import FeedError
 from signalx.live import LiveError
 from signalx.logos import LogoError
 from signalx.models import Zone
+from signalx.paper import PaperBroker, PaperConfig, save_paper_state, write_paper_heartbeat
 from tests.helpers import series_from_closes
 
 FAKE_SNAP = {
@@ -807,3 +808,68 @@ class TestSecurityHeaders:
         assert names.count("content-security-policy") == 1
         assert names.count("cache-control") == 1
         assert names.count("x-frame-options") == 1
+
+
+class TestPaper:
+    @pytest.mark.anyio
+    async def test_paper_unknown_when_not_started(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(server, "PAPER_STATE_PATH", tmp_path / "state.json")
+        monkeypatch.setattr(server, "PAPER_HEARTBEAT_PATH", tmp_path / "heartbeat.json")
+        monkeypatch.setattr(server, "PAPER_HALT_PATH", tmp_path / "HALT")
+        async with make_client() as c:
+            r = await c.get("/api/paper")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["known"] is False
+        assert body["heartbeat"]["known"] is False
+
+    @pytest.mark.anyio
+    async def test_paper_state_and_halt(self, tmp_path, monkeypatch):
+        state_path = tmp_path / "state.json"
+        hb_path = tmp_path / "heartbeat.json"
+        halt_path = tmp_path / "HALT"
+        monkeypatch.setattr(server, "PAPER_STATE_PATH", state_path)
+        monkeypatch.setattr(server, "PAPER_HEARTBEAT_PATH", hb_path)
+        monkeypatch.setattr(server, "PAPER_HALT_PATH", halt_path)
+
+        broker = PaperBroker(PaperConfig(taker_fee_bps=0.0, slippage_bps=0.0), now_ms=1_700_000_000_000)
+        broker.open_from_signal(
+            {"symbol": "AAAUSDT", "ts_ms": 1_700_000_000_000, "entry": 100.0,
+             "stop": 105.0, "tp1": 95.0, "tp2": 90.0, "score": 0.7},
+            100.0,
+            1_700_000_000_000,
+        )
+        save_paper_state(broker, state_path, 1_700_000_000_001)
+        write_paper_heartbeat(broker, hb_path, 1_700_000_000_001)
+
+        async with make_client() as c:
+            r = await c.get("/api/paper")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["known"] is True
+        assert body["equity"] == pytest.approx(10_000.0)
+        assert body["positions"][0]["symbol"] == "AAAUSDT"
+        assert body["heartbeat"]["known"] is True
+
+        async with make_client() as c:
+            h = await c.post("/api/paper/halt", json={"reason": "test halt"})
+        assert h.status_code == 200
+        assert halt_path.exists()
+        assert h.json()["halted"] is True
+
+        async with make_client() as c:
+            r2 = await c.get("/api/paper")
+        assert r2.json()["manual_halt"] is True
+        assert r2.json()["halted"] is True
+
+    @pytest.mark.anyio
+    async def test_paper_corrupt_state_is_500(self, tmp_path, monkeypatch):
+        state_path = tmp_path / "state.json"
+        state_path.write_text('{"equity": "oops"}', encoding="utf-8")
+        monkeypatch.setattr(server, "PAPER_STATE_PATH", state_path)
+        monkeypatch.setattr(server, "PAPER_HEARTBEAT_PATH", tmp_path / "heartbeat.json")
+        monkeypatch.setattr(server, "PAPER_HALT_PATH", tmp_path / "HALT")
+        async with make_client() as c:
+            r = await c.get("/api/paper")
+        assert r.status_code == 500
+        assert "unreadable" in r.json()["detail"]

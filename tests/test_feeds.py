@@ -20,6 +20,7 @@ from signalx.feeds import (
     fetch_gainers,
     fetch_klines,
     fetch_open_interest,
+    fetch_price,
     fetch_ticker,
     poll_snapshot,
 )
@@ -62,6 +63,8 @@ def default_handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=BULK_TICKER)
     if path in ("/fapi/v1/ticker/24hr", "/api/v3/ticker/24hr"):
         return httpx.Response(200, json={"symbol": q["symbol"], "priceChangePercent": "12.5"})
+    if path in ("/fapi/v1/ticker/price", "/api/v3/ticker/price"):
+        return httpx.Response(200, json={"symbol": q["symbol"], "price": "123.45"})
     if path == "/fapi/v1/premiumIndex":
         return httpx.Response(200, json={"lastFundingRate": "0.0001"})
     if path == "/fapi/v1/fundingRate":
@@ -168,6 +171,14 @@ class TestFetches:
         async with mk_client() as client:
             with pytest.raises(FeedError):
                 await fetch_klines(client, "futures", "AAAUSDT", "7m", NOW)
+
+    @pytest.mark.anyio
+    async def test_fetch_price_valid_and_hostile(self):
+        async with mk_client() as client:
+            assert await fetch_price(client, "futures", "AAAUSDT") == pytest.approx(123.45)
+        async with mk_client() as client:
+            with pytest.raises(FeedError):
+                await fetch_price(client, "futures", "../etc/passwd")
 
     @pytest.mark.anyio
     async def test_fetch_ticker_valid_and_hostile(self):

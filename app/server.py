@@ -6,11 +6,21 @@ Endpoints:
   GET /api/gainers             USDT-M futures 24h gainers (bulk ticker)
   GET /api/logos               symbol -> CoinGecko icon URL (cosmetic, cached)
   GET /api/signals             sentinel journal: transitions + short signals
+  GET /api/paper               paper companion state / P&L (read-only)
+  POST /api/paper/halt         create the paper-entry kill switch; no orders
   GET /api/snapshot/{symbol}   one observation snapshot
+  GET /api/sniper/{symbol}     SNIPER V3 1H/15m/5m observation (no orders)
+  GET /api/sniper/watchlist    assigned symbols + latest monitor results
+  POST /api/sniper/watchlist   assign a symbol to the SNIPER watchlist
+  DELETE /api/sniper/watchlist/{symbol}  unassign a symbol
   GET /api/stream/{symbol}     SSE push loop for the SPA
   GET /api/klines/{symbol}     OHLCV candles for the chart (incl. live bar)
   GET /api/overlays/{symbol}   algorithm chart layers (closed bars only)
   GET /api/ema-cascade/{symbol} EMA 8/13/21 state per TF + cross propagation
+  GET /api/chat/status          Ollama Cloud chat configuration (no key)
+  GET /api/chat/skills          chart-interpretation skill catalog
+  POST /api/chat                chart analyst reply (selected Ollama Cloud model)
+  POST /api/chat/model          persist the dashboard model selection
 
 Observation tool only: the G0 full-universe rerun KILLED the short-edge
 hypothesis (reports/g0_full/VERDICT.md). There are no trading endpoints and
@@ -30,12 +40,14 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
+from typing import Literal
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import httpx  # noqa: E402
 from fastapi import Depends, FastAPI, HTTPException, Query, Request  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
 from fastapi.responses import FileResponse, StreamingResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
@@ -52,8 +64,35 @@ from signalx.ema import CASCADE_TFS, TfInfo, cascade_pattern, tf_crosses  # noqa
 from signalx.journal import SignalJournal  # noqa: E402
 from signalx.live import LiveError  # noqa: E402
 from signalx.logos import LogoError, fetch_coin_logos, resolve_coin_logo  # noqa: E402
+from signalx.paper import PaperError, load_paper_state  # noqa: E402
+from signalx.sniper_v3.assignments import (  # noqa: E402
+    AssignmentError,
+    AssignmentFullError,
+    AssignmentStore,
+)
+from signalx.sniper_v3.data import (  # noqa: E402
+    fetch_and_evaluate_detailed,
+    funding_percentile,
+    oi_crowding,
+)
+from signalx.sniper_v3.monitor import SniperMonitor  # noqa: E402
+from signalx.sniper_v3.primitives import SniperError  # noqa: E402
 from signalx.overlays import MIN_BARS, OverlayError, build_overlays  # noqa: E402
 from signalx.validation import ValidationError, validate_interval, validate_symbol  # noqa: E402
+from signalx.chat import (  # noqa: E402
+    CHART_SKILLS,
+    MAX_SKILLS,
+    ChatConfig,
+    ChatConfigError,
+    ChartContextError,
+    ChatRequestError,
+    OllamaCloudError,
+    build_chart_context,
+    generate_reply,
+    public_models,
+    public_skills,
+    save_chat_model,
+)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 JOURNAL_DIR = Path(os.environ.get("SIGNALX_JOURNAL_DIR", str(ROOT / "data" / "journal")))
@@ -61,6 +100,21 @@ HEARTBEAT_PATH = Path(os.environ.get(
     "SIGNALX_HEARTBEAT", str(ROOT / "data" / "sentinel_heartbeat.json")
 ))
 HEARTBEAT_STALE_MS = 5 * 60 * 1000  # sentinel sweeps every 60s; 5m = offline
+PAPER_DIR = Path(os.environ.get(
+    "SIGNALX_PAPER_DIR", str(ROOT / "data" / "paper")
+))
+PAPER_STATE_PATH = PAPER_DIR / "state.json"
+PAPER_HEARTBEAT_PATH = PAPER_DIR / "heartbeat.json"
+PAPER_HALT_PATH = Path(os.environ.get(
+    "SIGNALX_TRADING_HALT", str(Path.home() / ".config" / "signal-x" / "TRADING_HALT")
+))
+PAPER_HEARTBEAT_STALE_MS = 5 * 60 * 1000
+SNIPER_DIR = Path(os.environ.get(
+    "SIGNALX_SNIPER_DIR", str(ROOT / "data" / "sniper")
+))
+SNIPER_ASSIGNMENTS_PATH = SNIPER_DIR / "assignments.json"
+SNIPER_RESULTS_PATH = SNIPER_DIR / "latest.json"
+sniper_store = AssignmentStore(SNIPER_ASSIGNMENTS_PATH)
 MIN_STREAM_INTERVAL_S = 1.0
 DEFAULT_STREAM_INTERVAL_S = 30.0
 MAX_STREAM_INTERVAL_S = 3600.0
@@ -77,12 +131,52 @@ EMA_CACHE_TTL_S = 15.0
 _ema_cache: dict = {}
 
 
+class ChatTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    # The service trims each turn to 4k chars and the total to 12k. Accept a
+    # full reply here so a follow-up question is not rejected before trimming.
+    content: str = Field(min_length=1, max_length=30_000)
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    symbol: str = Field(min_length=1, max_length=20)
+    market: Literal["auto", "spot", "futures"] = "auto"
+    tf: str = Field(default="5m", max_length=8)
+    history: list[ChatTurn] = Field(default_factory=list, max_length=10)
+
+
+class ChatModelRequest(BaseModel):
+    model: str = Field(min_length=1, max_length=120)
+
+
+class PaperHaltRequest(BaseModel):
+    reason: str = Field(default="manual dashboard halt", max_length=200)
+
+
+class SniperAssignRequest(BaseModel):
+    symbol: str = Field(min_length=1, max_length=20)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.client = make_client()
+    monitor = SniperMonitor(
+        app.state.client,
+        sniper_store,
+        SNIPER_RESULTS_PATH,
+    )
+    app.state.sniper_monitor = monitor
+    task = monitor.start()
     try:
         yield
     finally:
+        monitor.stop()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
         await app.state.client.aclose()
 
 
@@ -92,7 +186,6 @@ app = FastAPI(
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
 )
-
 
 class SecHeadersMiddleware:
     """Pure-ASGI middleware adding hardening headers to every HTTP response.
@@ -201,7 +294,7 @@ def _clean_chart_tf(tf: str) -> str:
 def _map_error(exc: Exception) -> HTTPException:
     if isinstance(exc, FeedError):
         return HTTPException(status_code=502, detail=f"upstream feed error: {exc}")
-    if isinstance(exc, (LiveError, OverlayError)):
+    if isinstance(exc, (LiveError, OverlayError, SniperError)):
         return HTTPException(status_code=422, detail=f"insufficient/invalid data: {exc}")
     return HTTPException(status_code=400, detail=str(exc))
 
@@ -233,6 +326,100 @@ async def health() -> dict:
         "now_ms": now_ms,
         "sentinel": _sentinel_status(now_ms),
     }
+
+
+@app.get("/api/chat/status")
+async def chat_status() -> dict:
+    """Browser-safe chat status. The API key never leaves the server."""
+    try:
+        cfg = ChatConfig.from_env()
+    except ChatConfigError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {
+        **cfg.public(),
+        "models": public_models(),
+        "skills": len(CHART_SKILLS),
+        "max_skills": MAX_SKILLS,
+        "max_history": 10,
+    }
+
+
+@app.post("/api/chat/model")
+async def set_chat_model(req: ChatModelRequest) -> dict:
+    """Persist a model selection; subsequent chat requests use it."""
+    try:
+        save_chat_model(req.model)
+        cfg = ChatConfig.from_env()
+    except ChatConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        **cfg.public(),
+        "models": public_models(),
+        "skills": len(CHART_SKILLS),
+        "max_skills": MAX_SKILLS,
+        "max_history": 10,
+    }
+
+
+@app.get("/api/chat/skills")
+async def chat_skills() -> dict:
+    """The full chart-interpretation lens catalog."""
+    return {"count": len(CHART_SKILLS), "skills": public_skills()}
+
+
+@app.post("/api/chat")
+async def chat(
+    req: ChatRequest,
+    client: httpx.AsyncClient = Depends(get_client),
+) -> dict:
+    """Interpret the current chart with MiniMax-M3.1 Flash via Ollama Cloud.
+
+    The chart packet is built server-side from the same validated feeds and
+    closed-bar engines as the dashboard. Chat history is capped and sanitized;
+    the model cannot request tools or fetch additional data.
+    """
+    try:
+        cfg = ChatConfig.from_env()
+    except ChatConfigError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not cfg.configured:
+        raise HTTPException(
+            status_code=503,
+            detail="chat is not configured: set OLLAMA_API_KEY (or SIGNALX_OLLAMA_KEY_FILE) and retry",
+        )
+
+    sym = _clean_symbol(req.symbol)
+    tf = _clean_chart_tf(req.tf)
+    market = req.market
+    try:
+        if market == "auto":
+            market = await detect_market(client, sym)
+        context = await build_chart_context(
+            client,
+            sym,
+            market,
+            tf,
+            int(time.time() * 1000),
+            journal_dir=JOURNAL_DIR,
+        )
+        return await generate_reply(
+            cfg,
+            req.message,
+            context,
+            [turn.model_dump() for turn in req.history],
+        )
+    except ChatRequestError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ChartContextError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"chart data unavailable: {str(exc)[:300]}"
+        ) from exc
+    except OllamaCloudError as exc:
+        raise HTTPException(
+            status_code=exc.status_code or 502, detail=str(exc)[:500]
+        ) from exc
+    except (FeedError, LiveError, OverlayError, ValidationError) as exc:
+        raise _map_error(exc) from exc
 
 
 @app.get("/api/signals")
@@ -269,6 +456,70 @@ async def signals(
         "latest_ts_ms": latest_ts_ms,
         "sentinel": _sentinel_status(now_ms),
     }
+
+
+def _paper_heartbeat(now_ms: int) -> dict:
+    try:
+        hb = json.loads(PAPER_HEARTBEAT_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"known": False, "running": False, "age_ms": None}
+    if not isinstance(hb, dict) or not isinstance(hb.get("ts_ms"), int):
+        return {"known": False, "running": False, "age_ms": None}
+    age_ms = max(0, now_ms - hb["ts_ms"])
+    out = {"known": True, "running": age_ms <= PAPER_HEARTBEAT_STALE_MS,
+           "age_ms": age_ms, "ts_ms": hb["ts_ms"]}
+    for key in ("equity", "open_positions", "halted", "last_signal_ts", "source"):
+        if key in hb:
+            out[key] = hb[key]
+    return out
+
+
+@app.get("/api/paper")
+async def paper() -> dict:
+    """Read-only paper companion state. No exchange client, no order endpoint."""
+    now_ms = int(time.time() * 1000)
+    heartbeat = _paper_heartbeat(now_ms)
+    if not PAPER_STATE_PATH.exists():
+        return {
+            "known": False,
+            "mode": "paper",
+            "now_ms": now_ms,
+            "heartbeat": heartbeat,
+            "halted": PAPER_HALT_PATH.exists(),
+            "manual_halt": PAPER_HALT_PATH.exists(),
+            "message": "paper companion not started",
+        }
+    try:
+        broker = load_paper_state(
+            PAPER_STATE_PATH,
+            manual_halt=PAPER_HALT_PATH.exists(),
+            now_ms=now_ms,
+        )
+        if broker is None:
+            raise PaperError("state missing after existence check")
+        state = broker.snapshot(now_ms)
+    except (OSError, ValueError, PaperError) as exc:
+        raise HTTPException(status_code=500, detail=f"paper state unreadable: {str(exc)[:300]}") from exc
+    return {
+        "known": True,
+        "now_ms": now_ms,
+        "heartbeat": heartbeat,
+        **state,
+    }
+
+
+@app.post("/api/paper/halt")
+async def paper_halt(req: PaperHaltRequest) -> dict:
+    """Create the kill-switch file. This blocks new paper entries only."""
+    reason = req.reason.strip() or "manual dashboard halt"
+    try:
+        PAPER_HALT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = PAPER_HALT_PATH.with_name(PAPER_HALT_PATH.name + ".tmp")
+        tmp.write_text(reason + "\n", encoding="utf-8")
+        os.replace(tmp, PAPER_HALT_PATH)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"cannot write halt file: {str(exc)[:200]}") from exc
+    return {"ok": True, "halted": True, "reason": reason}
 
 
 @app.get("/api/gainers")
@@ -380,6 +631,104 @@ async def snapshot(
         )
     except (FeedError, LiveError, ValidationError) as exc:
         raise _map_error(exc) from exc
+
+
+def _sniper_monitor(request: Request) -> SniperMonitor | None:
+    return getattr(request.app.state, "sniper_monitor", None)
+
+
+@app.get("/api/sniper/watchlist")
+async def sniper_watchlist(request: Request) -> dict:
+    """Assigned symbols and the monitor's latest closed-bar evaluations."""
+    monitor = _sniper_monitor(request)
+    latest = monitor.snapshot() if monitor is not None else {
+        "evaluating": False,
+        "heartbeat_ms": None,
+        "symbols": sniper_store.symbols(),
+        "results": {},
+        "last_error": None,
+    }
+    return {
+        **latest,
+        "assignments": [row.to_dict() for row in sniper_store.assignments()],
+    }
+
+
+@app.post("/api/sniper/watchlist")
+async def sniper_assign(payload: SniperAssignRequest, request: Request) -> dict:
+    """Assign a symbol; the monitor wakes and evaluates it on closed candles."""
+    try:
+        row, created = sniper_store.add(payload.symbol)
+    except AssignmentFullError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except AssignmentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    monitor = _sniper_monitor(request)
+    if monitor is not None:
+        monitor.wake()
+    return {
+        "symbol": row.symbol,
+        "created": created,
+        "assignments": [a.to_dict() for a in sniper_store.assignments()],
+    }
+
+
+@app.delete("/api/sniper/watchlist/{symbol}")
+async def sniper_unassign(symbol: str, request: Request) -> dict:
+    try:
+        sym = symbol.strip().upper()
+        removed = sniper_store.remove(sym)
+    except AssignmentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"not assigned: {sym}")
+    monitor = _sniper_monitor(request)
+    if monitor is not None:
+        monitor.forget(sym)
+        monitor.wake()
+    return {
+        "symbol": sym,
+        "removed": True,
+        "assignments": [a.to_dict() for a in sniper_store.assignments()],
+    }
+
+
+@app.get("/api/sniper/{symbol}")
+async def sniper(
+    symbol: str,
+    client: httpx.AsyncClient = Depends(get_client),
+) -> dict:
+    """SNIPER V3 observation: 1H permission -> 15m location -> 5m timing.
+
+    Observation only. A null decision means one or more causal gates failed;
+    this endpoint never writes a journal SIGNAL and never places an order.
+    """
+    sym = _clean_symbol(symbol)
+    try:
+        inputs, decision, diagnostics = await fetch_and_evaluate_detailed(client, sym)
+    except (FeedError, SniperError, ValidationError) as exc:
+        raise _map_error(exc) from exc
+    if not inputs.klines_5m:
+        raise HTTPException(status_code=422, detail="no closed 5m candles")
+    return {
+        "symbol": sym,
+        "status": "setup" if decision is not None else "no_setup",
+        "as_of_ms": inputs.klines_5m[-1].close_time,
+        "last_close": inputs.klines_5m[-1].close,
+        "context": {
+            "funding_rate": inputs.funding_rate,
+            "funding_pctile": funding_percentile(inputs),
+            "oi_now": inputs.oi_now,
+            "oi_crowding": oi_crowding(inputs),
+            "bars": {
+                "1h": len(inputs.klines_1h),
+                "15m": len(inputs.klines_15m),
+                "5m": len(inputs.klines_5m),
+            },
+        },
+        "decision": decision.to_dict() if decision is not None else None,
+        "diagnostics": diagnostics.to_dict(),
+    }
 
 
 @app.get("/api/klines/{symbol}")

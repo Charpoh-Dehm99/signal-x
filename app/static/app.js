@@ -15,13 +15,14 @@ function esc(s) {
 const STREAM_INTERVAL_S = 15;
 const TAIL_MS = 2500;
 const OVERLAY_MS = 25000;
-const HOT_EVENTS = new Set(["RESISTANCE_TOUCHED", "SQUEEZE_GUARD", "BOS_DOWN"]);
+const HOT_EVENTS = new Set(["RESISTANCE_TOUCHED", "SQUEEZE_GUARD", "BOS_DOWN", "PUMP_FAILED"]);
 const WARN_EVENTS = new Set(["NEAR_RESISTANCE", "BEARISH_DIVERGENCE", "BULLISH_DIVERGENCE", "MOMENTUM_DECAY", "FUNDING_EXTREME"]);
 const EVENT_TEXT = {
   RESISTANCE_TOUCHED: "Resistance touched",
   NEAR_RESISTANCE: "Approaching resistance",
   SQUEEZE_GUARD: "Squeeze guard \u2014 expansion window",
   BOS_DOWN: "BOS down \u2014 structure break below",
+  PUMP_FAILED: "Pump failed \u2014 structure broke",
   BEARISH_DIVERGENCE: "Bearish divergence \u2192 SHORT bias",
   BULLISH_DIVERGENCE: "Bullish divergence \u2192 LONG bias",
   MOMENTUM_DECAY: "Momentum decaying",
@@ -360,6 +361,15 @@ function fmtSignedQv(v) {
   if (v == null || !isFinite(v)) return "\u2014";
   return (v >= 0 ? "+" : "-") + fmtQv(Math.abs(v));
 }
+function fmtMoney(v) {
+  if (v == null || !isFinite(v)) return "\u2014";
+  const sign = v < 0 ? "-" : "";
+  return sign + "$" + Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function fmtSignedMoney(v) {
+  if (v == null || !isFinite(v)) return "\u2014";
+  return (v >= 0 ? "+" : "") + fmtMoney(v);
+}
 function cell(label, value, cls) {
   return '<div class="cell"><div class="k">' + label + '</div><div class="v ' + (cls || "") + '">' + value + "</div></div>";
 }
@@ -572,6 +582,318 @@ function renderEmaCascade(d) {
   $("ema-upd").textContent = "updated " + new Date().toLocaleTimeString();
   const errs = d.errors ? Object.keys(d.errors) : [];
   $("ema-errors").textContent = errs.length ? "no data for: " + errs.join(", ") : "";
+}
+
+/* ------------------------------------------------ SNIPER V3 observation */
+const SNIPER_NOTIFY_KEY = "sx_sniper_notify";
+let sniperNotifyOn = false;
+try { sniperNotifyOn = localStorage.getItem(SNIPER_NOTIFY_KEY) === "1"; } catch { /* private mode */ }
+const sniperAlertSeen = new Map();
+
+function sniperPermission() {
+  if (typeof window === "undefined" || !("Notification" in window)) return "unsupported";
+  return Notification.permission;
+}
+
+function updateSniperNotify() {
+  const btn = $("sniper-notify");
+  const label = $("sniper-notify-label");
+  const hint = $("sniper-notify-hint");
+  if (!btn) return;
+  const perm = sniperPermission();
+  btn.classList.toggle("on", sniperNotifyOn);
+  btn.classList.toggle("blocked", sniperNotifyOn && perm === "denied");
+  btn.setAttribute("aria-pressed", sniperNotifyOn ? "true" : "false");
+  if (label) label.textContent = sniperNotifyOn ? "NOTIFY ON" : "NOTIFY OFF";
+  if (hint) {
+    if (!sniperNotifyOn) hint.textContent = "new setup alerts";
+    else if (perm === "granted") hint.textContent = "desktop + bell";
+    else if (perm === "denied") hint.textContent = "bell only \u00b7 desktop blocked";
+    else if (perm === "unsupported") hint.textContent = "bell only";
+    else hint.textContent = "bell only";
+  }
+  btn.title = sniperNotifyOn
+    ? "SNIPER notifications are on; click to turn off"
+    : "Notify when an assigned coin flips to LONG or SHORT";
+}
+
+function setSniperNotify(on) {
+  sniperNotifyOn = on;
+  try { localStorage.setItem(SNIPER_NOTIFY_KEY, on ? "1" : "0"); } catch { /* private mode */ }
+  updateSniperNotify();
+}
+
+async function toggleSniperNotify() {
+  if (sniperNotifyOn) {
+    setSniperNotify(false);
+    return;
+  }
+  const perm = sniperPermission();
+  if (perm === "default") {
+    try { await Notification.requestPermission(); } catch { /* unsupported / blocked */ }
+  }
+  setSniperNotify(true);
+}
+
+function sniperSignature(rec) {
+  if (!rec) return "wait";
+  if (rec.status === "error") return "error";
+  if (rec.decision) return "setup:" + String(rec.decision.direction || "").toLowerCase();
+  return "no_setup";
+}
+
+function sniperAlertSetup(sym, dec) {
+  const dir = String(dec.direction || "setup").toUpperCase();
+  const entry = "entry " + fmtPrice(dec.entry);
+  const stop = "stop " + fmtPrice(dec.stop);
+  const rr = "RR " + Number(dec.rr || 0).toFixed(2);
+  const msg = dir + " \u00b7 " + entry + " \u00b7 " + stop + " \u00b7 " + rr;
+  if (typeof Sound !== "undefined") {
+    Sound.play("signal", "sniper|" + sym + "|" + dir + "|" + String(dec.as_of_ms || ""), {
+      sym,
+      msg: "SNIPER V3 \u00b7 " + msg,
+    });
+  } else if (typeof Notify !== "undefined") {
+    Notify.push("signal", { sym, msg: "SNIPER V3 \u00b7 " + msg });
+  }
+
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  try {
+    const body = entry + " \u00b7 " + stop + " \u00b7 TP1 " + fmtPrice(dec.tp1) + " \u00b7 " + rr;
+    const n = new Notification("SNIPER V3 \u00b7 " + sym + " " + dir, {
+      body,
+      tag: "sniper-" + sym,
+      silent: true,
+    });
+    n.onclick = () => {
+      window.focus();
+      selectSymbol(sym);
+      n.close();
+    };
+    setTimeout(() => { try { n.close(); } catch { /* already closed */ } }, 15000);
+  } catch { /* desktop notification is secondary to the bell */ }
+}
+
+function sniperCheckAlerts(symbols, results) {
+  const current = new Set(symbols);
+  for (const sym of symbols) {
+    const rec = results[sym];
+    const sig = sniperSignature(rec);
+    const prev = sniperAlertSeen.get(sym);
+    const nowSetup = sig.startsWith("setup:");
+    const wasSetup = prev != null && prev.startsWith("setup:");
+    if (sniperNotifyOn && prev != null && nowSetup && (!wasSetup || prev !== sig)) {
+      sniperAlertSetup(sym, rec.decision);
+    }
+    sniperAlertSeen.set(sym, sig);
+  }
+  for (const sym of sniperAlertSeen.keys()) {
+    if (!current.has(sym)) sniperAlertSeen.delete(sym);
+  }
+}
+
+function sniperChecksHtml(diag, extra) {
+  const checks = diag && Array.isArray(diag.checks) ? diag.checks : [];
+  const reason = extra || (diag && diag.reason) || "";
+  if (!checks.length) {
+    return '<div class="sniper-diag-reason">' + esc(reason || "diagnostics unavailable") + '</div>';
+  }
+  const glyph = { pass: "\u2713", fail: "\u2717", skip: "\u2014", info: "\u00b7" };
+  const chips = checks.map((c) => (
+    '<span class="sniper-check ' + esc(c.state) + '" title="' + esc(c.detail || "") + '">' +
+      '<b>' + esc(c.label) + '</b> ' + (glyph[c.state] || "\u00b7") +
+    '</span>'
+  )).join("");
+  return '<div class="sniper-checks">' + chips + '</div>' +
+    (reason ? '<div class="sniper-diag-reason">' + esc(reason) + '</div>' : "");
+}
+
+function sniperShortReason(diag) {
+  const labels = {
+    bars: "missing bars",
+    structure: "bad structure",
+    htf: "1H weak",
+    mtf_opposition: "15m opposes",
+    zone: "no valid zone",
+    sweep: "no sweep",
+    setup_score: "weak setup",
+    trigger: "no 5m BOS",
+    trigger_volume: "low volume",
+    trigger_score: "weak 5m",
+    stop_distance: "stop too wide",
+    target: "bad target",
+    rr: "low RR",
+    confidence: "low confidence",
+    expected_value: "negative EV",
+  };
+  return (diag && labels[diag.failed_gate]) || "gates closed";
+}
+
+function sniperAgo(ms) {
+  if (!ms) return "";
+  const seconds = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (seconds < 60) return seconds + "s ago";
+  if (seconds < 3600) return Math.round(seconds / 60) + "m ago";
+  return Math.round(seconds / 3600) + "h ago";
+}
+
+function renderSniperWatchlist(d) {
+  const list = $("sniper-watchlist");
+  const status = $("sniper-watch-state");
+  if (!list) return;
+  const symbols = Array.isArray(d.symbols) ? d.symbols : [];
+  const results = d.results || {};
+  sniperCheckAlerts(symbols, results);
+  updateSniperNotify();
+  if (status) {
+    if (d.evaluating) status.textContent = "scanning\u2026";
+    else if (d.heartbeat_ms && Date.now() - d.heartbeat_ms > 10 * 60 * 1000) status.textContent = "stale \u00b7 " + sniperAgo(d.heartbeat_ms);
+    else if (d.heartbeat_ms) status.textContent = "scan " + sniperAgo(d.heartbeat_ms);
+    else status.textContent = "monitor starting\u2026";
+  }
+  if (!symbols.length) {
+    list.innerHTML = '<div class="muted small">none assigned</div>';
+    return;
+  }
+  list.innerHTML = symbols.map((symbol) => {
+    const rec = results[symbol];
+    let label = "WAIT";
+    let cls = "WATCH";
+    let detail = "queued";
+    let rowTitle = "Load " + symbol + " chart";
+    if (rec) {
+      if (rec.status === "error") {
+        label = "ERR";
+        cls = "ERR";
+        detail = "feed error";
+        rowTitle = rec.error ? String(rec.error) : rowTitle;
+      } else if (rec.decision) {
+        const dec = rec.decision;
+        label = String(dec.direction || "setup").toUpperCase();
+        cls = label;
+        detail = "RR " + Number(dec.rr || 0).toFixed(1);
+        rowTitle = "Load " + symbol + " chart \u00b7 " + label + " \u00b7 RR " + detail.slice(3);
+      } else {
+        label = "NO SETUP";
+        detail = sniperShortReason(rec.diagnostics);
+        rowTitle = "Load " + symbol + " chart \u00b7 " + ((rec.diagnostics && rec.diagnostics.reason) || detail);
+      }
+    }
+    return '<div class="sniper-watch-row" data-sniper-sym="' + esc(symbol) + '" role="button" tabindex="0" title="' + esc(rowTitle) + '">' +
+      '<span class="sniper-watch-sym">' + esc(symbol) + '</span>' +
+      '<span class="badge ' + cls + '">' + esc(label) + '</span>' +
+      '<span class="sniper-watch-detail">' + esc(detail) + '</span>' +
+      '<button class="sniper-watch-remove" type="button" data-sniper-remove="' + esc(symbol) + '" title="Unassign ' + esc(symbol) + '" aria-label="Unassign ' + esc(symbol) + '">&times;</button>' +
+      '</div>';
+  }).join("");
+}
+
+async function loadSniperWatchlist() {
+  try {
+    const r = await fetch("/api/sniper/watchlist");
+    if (!r.ok) return;
+    renderSniperWatchlist(await r.json());
+  } catch { /* transient */ }
+}
+
+async function assignSniper() {
+  const input = $("sniper-symbol");
+  const btn = $("sniper-assign");
+  const status = $("sniper-watch-state");
+  if (!input) return;
+  const sym = input.value.trim().toUpperCase();
+  if (!/^[A-Z0-9]{4,20}$/.test(sym)) {
+    if (status) status.textContent = "invalid symbol";
+    input.focus();
+    return;
+  }
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/sniper/watchlist", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ symbol: sym }),
+    });
+    let d = null;
+    try { d = await r.json(); } catch { d = null; }
+    if (!r.ok) {
+      if (status) status.textContent = d && d.detail ? String(d.detail) : "assign failed";
+      return;
+    }
+    input.value = "";
+    await loadSniperWatchlist();
+  } catch (e) {
+    if (status) status.textContent = "assign failed: " + e.message;
+  } finally {
+    if (btn) btn.disabled = false;
+    input.focus();
+  }
+}
+
+async function removeSniper(sym) {
+  try {
+    await fetch("/api/sniper/watchlist/" + encodeURIComponent(sym), { method: "DELETE" });
+  } catch { /* transient */ }
+  await loadSniperWatchlist();
+}
+
+async function loadSniper(sym, gen) {
+  if (!sym || gen !== state.gen) return;
+  const badge = $("sniper-badge");
+  const meta = $("sniper-meta");
+  const why = $("sniper-reasons");
+  const btn = $("sniper-refresh");
+  if (!badge || !meta || !btn) return;
+  btn.disabled = true;
+  badge.className = "badge WATCH";
+  badge.textContent = "SCAN";
+  meta.innerHTML = '<div class="muted small" style="grid-column:1/-1">evaluating closed 1H / 15m / 5m bars&hellip;</div>';
+  why.textContent = "";
+  try {
+    const r = await fetch("/api/sniper/" + encodeURIComponent(sym));
+    if (gen !== state.gen) return;
+    let d = null;
+    try { d = await r.json(); } catch { d = null; }
+    if (!r.ok || !d) {
+      badge.textContent = "ERR";
+      meta.innerHTML = '<div class="muted small" style="grid-column:1/-1">SNIPER unavailable</div>';
+      why.textContent = d && d.detail ? String(d.detail) : ("HTTP " + r.status);
+      return;
+    }
+    const ctx = d.context || {};
+    const dec = d.decision;
+    if (!dec) {
+      badge.textContent = "NO SETUP";
+      meta.innerHTML =
+        '<div class="cell"><div class="k">Status</div><div class="v">1H/15m/5m gates</div></div>' +
+        '<div class="cell"><div class="k">Funding pct</div><div class="v">' +
+          (ctx.funding_pctile == null ? "n/a" : Number(ctx.funding_pctile).toFixed(0)) + '</div></div>' +
+        '<div class="cell"><div class="k">OI crowd</div><div class="v">' +
+          (ctx.oi_crowding == null ? "n/a" : Number(ctx.oi_crowding).toFixed(2)) + '</div></div>' +
+        '<div class="cell"><div class="k">Bars</div><div class="v">' +
+          ((ctx.bars && ctx.bars["1h"]) || 0) + '/' + ((ctx.bars && ctx.bars["15m"]) || 0) + '/' +
+          ((ctx.bars && ctx.bars["5m"]) || 0) + '</div></div>';
+      why.innerHTML = sniperChecksHtml(d && d.diagnostics);
+      return;
+    }
+    const dir = dec.direction === "long" ? "LONG" : "SHORT";
+    badge.className = "badge " + dir;
+    badge.textContent = dir;
+    meta.innerHTML =
+      '<div class="cell"><div class="k">Entry</div><div class="v">' + esc(fmtPrice(dec.entry)) + '</div></div>' +
+      '<div class="cell"><div class="k">Stop</div><div class="v hot">' + esc(fmtPrice(dec.stop)) + '</div></div>' +
+      '<div class="cell"><div class="k">TP1</div><div class="v ok">' + esc(fmtPrice(dec.tp1)) + '</div></div>' +
+      '<div class="cell"><div class="k">RR / conf</div><div class="v">' +
+        Number(dec.rr).toFixed(2) + ' / ' + Number(dec.confidence).toFixed(2) + '</div></div>';
+    why.innerHTML = sniperChecksHtml(d && d.diagnostics, (dec.reasons || []).join(" \u00b7 "));
+  } catch (e) {
+    if (gen === state.gen) {
+      badge.textContent = "ERR";
+      why.textContent = "request failed: " + e.message;
+    }
+  } finally {
+    if (gen === state.gen) btn.disabled = false;
+  }
 }
 
 async function loadEmaCascade(sym, gen) {
@@ -990,6 +1312,92 @@ function renderSignals(data) {
   }).join("");
 }
 
+/* ------------------------------------------------ paper companion */
+async function loadPaper() {
+  try {
+    const r = await fetch("/api/paper");
+    if (!r.ok) throw new Error("paper " + r.status);
+    renderPaper(await r.json());
+  } catch (e) {
+    $("paper-heartbeat").textContent = "companion read failed: " + e.message;
+    $("paper-heartbeat").className = "muted small neg";
+  }
+}
+
+function renderPaper(d) {
+  const known = d.known === true;
+  const halted = !!(d.manual_halt || d.halted);
+  const mode = $("paper-mode");
+  mode.textContent = halted ? "HALTED" : (known ? "PAPER" : "OFFLINE");
+  mode.className = "badge " + (halted ? "SQUEEZE_RISK" : "WATCH");
+
+  const cls = (v) => v > 0 ? "ok" : v < 0 ? "hot" : "";
+  $("paper-summary").innerHTML =
+    cell("Equity", known ? fmtMoney(d.equity) : "\u2014", "") +
+    cell("Realized", known ? fmtSignedMoney(d.realized_pnl) : "\u2014", known ? cls(d.realized_pnl) : "") +
+    cell("Unrealized", known ? fmtSignedMoney(d.unrealized_pnl) : "\u2014", known ? cls(d.unrealized_pnl) : "") +
+    cell("Open risk", known ? fmtMoney(d.risk_used) : "\u2014", "");
+
+  const pos = known && d.positions ? d.positions : [];
+  const box = $("paper-positions");
+  if (!pos.length) {
+    box.innerHTML = '<div class="muted small">flat &middot; no open paper position' +
+      (halted ? " &middot; entries halted" : " &middot; waiting for a sentinel SIGNAL") + "</div>";
+  } else {
+    box.innerHTML = '<table class="paper-table"><thead><tr><th>symbol</th><th>side</th><th>entry</th><th>last</th><th>qty</th><th>stop</th><th>tp1</th><th>unrealized</th></tr></thead><tbody>' +
+      pos.map((p) => {
+        const u = p.unrealized_pnl || 0;
+        return "<tr><td class=\"s\">" + esc(p.symbol) + "</td><td>SHORT</td>" +
+          "<td>" + fmtPrice(p.entry_price) + "</td><td>" + fmtPrice(p.last_price) + "</td>" +
+          "<td>" + (p.remaining_qty == null ? "\u2014" : Number(p.remaining_qty).toPrecision(6)) + "</td>" +
+          "<td>" + fmtPrice(p.stop) + "</td><td>" + fmtPrice(p.tp1) + "</td>" +
+          '<td class="' + (u >= 0 ? "pos" : "neg") + '">' + fmtSignedMoney(u) + "</td></tr>";
+      }).join("") + "</tbody></table>";
+  }
+
+  const trades = known && d.recent_trades ? d.recent_trades.slice(-3).reverse() : [];
+  const tbox = trades.length
+    ? '<div class="paper-trades">last exits: ' + trades.map((t) =>
+        esc(t.symbol) + " " + esc(t.reason || "?") + " " + fmtSignedMoney(t.net)).join(" &middot; ") + "</div>"
+    : "";
+  box.innerHTML += tbox;
+
+  const hb = d.heartbeat || {};
+  const el = $("paper-heartbeat");
+  if (hb.known && hb.running) {
+    el.textContent = "companion live \u00b7 last sweep " + fmtAge(hb.age_ms) +
+      (known ? " \u00b7 " + (d.positions || []).length + " open" : "");
+    el.className = "muted small";
+  } else if (known) {
+    el.textContent = "companion offline \u00b7 last sweep " + (hb.known ? fmtAge(hb.age_ms) : "unknown");
+    el.className = "muted small neg";
+  } else {
+    el.textContent = "companion not started \u00b7 run scripts/companion.py";
+    el.className = "muted small";
+  }
+  const btn = $("paper-halt");
+  btn.disabled = halted;
+  btn.textContent = halted ? "ENTRIES HALTED" : "HALT ENTRIES";
+}
+
+function bindPaperHalt() {
+  $("paper-halt").addEventListener("click", async () => {
+    if (!confirm("Create the paper kill switch? This blocks new paper entries only; open positions still exit on stop/target.")) return;
+    try {
+      const r = await fetch("/api/paper/halt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "dashboard halt" }),
+      });
+      if (!r.ok) throw new Error("paper halt " + r.status);
+      await loadPaper();
+    } catch (e) {
+      $("paper-heartbeat").textContent = "halt failed: " + e.message;
+      $("paper-heartbeat").className = "muted small neg";
+    }
+  });
+}
+
 /* ------------------------------------------------ live chart plumbing */
 function overlayQuery() {
   const m = state.market || "auto";
@@ -1032,6 +1440,7 @@ async function loadChart(sym, gen, keepView) {
   }
   const kd = await kr.json();
   state.market = kd.market;
+  if (window.Chat) Chat.syncContext();
   state.candles = kd.candles;
   $("mkt").textContent = kd.market + " \u00b7 " + kd.tf;
   let ov = null;
@@ -1129,6 +1538,7 @@ function selectSymbol(sym) {
   stopLive();
   state.sym = sym;
   state.market = null;
+  if (window.Chat) Chat.syncContext();
   state.lastPrice = null;
   $("sym").textContent = sym;
   paintCoinIcon(sym);
@@ -1150,7 +1560,12 @@ function selectSymbol(sym) {
   $("ema-pattern").className = "ema-pattern";
   $("ema-errors").textContent = "";
   highlight(sym);
+  $("sniper-badge").className = "badge WATCH";
+  $("sniper-badge").textContent = "\u2014";
+  $("sniper-meta").innerHTML = '<span class="muted small">waiting for chart&hellip;</span>';
+  $("sniper-reasons").textContent = "";
   loadChart(sym, gen).catch((e) => { if (gen === state.gen) setStatus("chart failed: " + e.message); });
+  loadSniper(sym, gen);
 }
 
 /* ------------------------------------------------ controls */
@@ -1278,6 +1693,52 @@ function init() {
   setInterval(watchTop1, 30000);
   loadSignals();
   setInterval(loadSignals, 15000);
+  bindPaperHalt();
+  loadPaper();
+  setInterval(loadPaper, 15000);
+  const sniperBtn = $("sniper-refresh");
+  if (sniperBtn) sniperBtn.addEventListener("click", () => {
+    if (state.sym) loadSniper(state.sym, state.gen);
+  });
+  setInterval(() => {
+    if (state.sym && !document.hidden) loadSniper(state.sym, state.gen);
+  }, 60000);
+  const sniperAssign = $("sniper-assign");
+  if (sniperAssign) sniperAssign.addEventListener("click", assignSniper);
+  const sniperNotifyBtn = $("sniper-notify");
+  if (sniperNotifyBtn) sniperNotifyBtn.addEventListener("click", toggleSniperNotify);
+  updateSniperNotify();
+  const sniperSymbol = $("sniper-symbol");
+  if (sniperSymbol) {
+    sniperSymbol.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") assignSniper();
+    });
+  }
+  const sniperWatchlist = $("sniper-watchlist");
+  if (sniperWatchlist) {
+    sniperWatchlist.addEventListener("click", (e) => {
+      const remove = e.target.closest("[data-sniper-remove]");
+      if (remove) {
+        e.stopPropagation();
+        removeSniper(remove.getAttribute("data-sniper-remove"));
+        return;
+      }
+      const row = e.target.closest("[data-sniper-sym]");
+      if (row) selectSymbol(row.getAttribute("data-sniper-sym"));
+    });
+    sniperWatchlist.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      const row = e.target.closest("[data-sniper-sym]");
+      if (row) {
+        e.preventDefault();
+        selectSymbol(row.getAttribute("data-sniper-sym"));
+      }
+    });
+  }
+  loadSniperWatchlist();
+  setInterval(() => {
+    if (!document.hidden) loadSniperWatchlist();
+  }, 15000);
 
   const last = localStorage.getItem("sx_sym");
   if (last) {
