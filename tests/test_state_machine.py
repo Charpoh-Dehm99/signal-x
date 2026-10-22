@@ -107,6 +107,12 @@ def test_invalidation_resets_to_idle():
     assert sm2.step({"invalidation": True}) == State.IDLE
 
 
+def test_failed_pump_resets_to_idle_before_plateau():
+    sm = StateMachine()
+    assert sm.step({"pump_score": 0.8}) == State.PUMP
+    assert sm.step({"pump_failed": True}) == State.IDLE
+
+
 def test_plateau_timeout_returns_to_idle():
     sm = StateMachine(plateau_timeout_bars=3)
     sm.step({"pump_score": 0.8})

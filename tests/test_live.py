@@ -75,6 +75,7 @@ class TestSnapshot:
             symbol="TESTUSDT", klines5m=bars(closes), hourly_qv=qv, change_24h_pct=22.0,
         )
         assert snap["is_pump"] is True
+        assert snap["pump_failed"] is False
         assert snap["vol_z"] > 3.0
         assert snap["state"] == "PUMP"
 
@@ -167,7 +168,9 @@ class TestSnapshot:
         assert snap["swing_low"] == pytest.approx(95.0)
         assert snap["bos_down"] is True
         assert snap["bos_up"] is False
+        assert snap["pump_failed"] is True
         assert "BOS_DOWN" in snap["events"]
+        assert "PUMP_FAILED" in snap["events"]
 
     def test_bos_up_on_close_above_swing_high(self):
         n = 90
@@ -182,6 +185,32 @@ class TestSnapshot:
         assert snap["bos_up"] is True
         assert snap["bos_down"] is False
         assert "BOS_UP" in snap["events"]
+
+    def test_bos_down_event_is_not_sticky(self):
+        klines = resistance_series(last_close=94.0)
+        prev = klines[-2]
+        klines[-2] = mk_kline(prev.open_time, 100.0, 100.2, 93.8, 94.0, v=prev.volume)
+        snap = live_snapshot(symbol="TESTUSDT", klines5m=klines)
+        assert snap["swing_low"] == pytest.approx(95.0)
+        assert snap["bos_down"] is False
+        assert "BOS_DOWN" not in snap["events"]
+        # The structural state persists until price recovers, even though the
+        # one-bar BOS event has passed.
+        assert snap["pump_failed"] is True
+        assert "PUMP_FAILED" in snap["events"]
+
+    def test_bos_up_event_is_not_sticky(self):
+        n = 90
+        closes = [100.0] * n
+        highs = [101.0] * n
+        lows = [99.0] * n
+        highs[50] = 110.0
+        closes[-2] = closes[-1] = 111.0
+        highs[-2] = highs[-1] = 111.5
+        snap = live_snapshot(symbol="TESTUSDT", klines5m=bars(closes, highs=highs, lows=lows))
+        assert snap["swing_high"] == pytest.approx(110.0)
+        assert snap["bos_up"] is False
+        assert "BOS_UP" not in snap["events"]
 
     def test_squeeze_unknown_without_futures_inputs(self):
         snap = live_snapshot(symbol="TESTUSDT", klines5m=flat(90))

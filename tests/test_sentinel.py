@@ -34,6 +34,7 @@ def snap(**over):
         "swing_low": None,
         "bos_down": False,
         "has_bearish_div": False,
+        "pump_failed": False,
         "momentum_decay": False,
         "momentum_decay_bias": None,
         "funding_pctile": None,
@@ -87,6 +88,10 @@ class TestFeatures:
     def test_nonpositive_price_raises(self):
         with pytest.raises(SentinelError):
             features_from_snapshot(snap(price=0.0))
+
+    def test_pump_failed_passthrough(self):
+        assert features_from_snapshot(snap(pump_failed=True))["pump_failed"] is True
+        assert features_from_snapshot(snap())["pump_failed"] is False
 
     def test_volume_gate_fails_closed_when_unknown(self):
         f = features_from_snapshot(snap(vol_ratio=None))

@@ -58,6 +58,8 @@ class StateMachine:
                 return State.PUMP
 
         elif state == State.PUMP:
+            if f.get("pump_failed"):
+                return State.IDLE
             if f.get("compression_qualifies") and f.get("momentum_decaying"):
                 return State.PLATEAU
 

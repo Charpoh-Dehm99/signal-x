@@ -115,6 +115,7 @@ def features_from_snapshot(
     return {
         "pump_score": pump_score(snap.get("change_24h_pct"), snap.get("vol_z")),
         "compression_qualifies": bool(isinstance(cm, dict) and cm.get("qualifies")),
+        "pump_failed": bool(snap.get("pump_failed")),
         "momentum_decaying": (
             bool(snap.get("momentum_decay"))
             and snap.get("momentum_decay_bias") != "bull"

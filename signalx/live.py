@@ -60,6 +60,15 @@ def _divergence_age(divs: list[tuple], n_bars: int) -> int | None:
     return max(0, n_bars - 1 - confirmed)
 
 
+def _fresh_break(level: float | None, previous: float, current: float, *, upward: bool) -> bool:
+    """True only on the bar that crosses `level` (not while it stays beyond)."""
+    if level is None:
+        return False
+    if upward:
+        return previous <= level < current
+    return previous >= level > current
+
+
 def volume_z(closed_qv: list[float], *, window: int = 168, min_periods: int = 120) -> float | None:
     """Z-score of the latest CLOSED hourly quote volume vs the prior `window` hours.
 
@@ -155,8 +164,22 @@ def live_snapshot(
 
     swing_low = last_swing(pivots, "L")
     swing_high = last_swing(pivots, "H")
-    bos_down = bool(swing_low is not None and price < swing_low.price)
-    bos_up = bool(swing_high is not None and price > swing_high.price)
+    previous_close = closes[-2]
+    # BOS is a one-bar event. A close that is still beyond the same swing is not
+    # a new break; otherwise every snapshot re-fires BOS_DOWN/BOS_UP and can
+    # re-trigger alerts. `pump_failed` is the persistent structural state below.
+    bos_down = _fresh_break(
+        swing_low.price if swing_low is not None else None,
+        previous_close, price, upward=False,
+    )
+    bos_up = _fresh_break(
+        swing_high.price if swing_high is not None else None,
+        previous_close, price, upward=True,
+    )
+    # A pump that has broken structure and no longer qualifies as a live pump
+    # is a failed pump/dump, not an active pump. This is an observation used to
+    # retire stale PUMP states; it is not an entry signal.
+    pump_failed = bool(swing_low is not None and price < swing_low.price and not is_pump)
 
     # volume ratio of the latest closed bar vs the prior 20 closed bars
     vol_ratio = None
@@ -245,6 +268,8 @@ def live_snapshot(
         events.append("BOS_DOWN")
     elif bos_up:
         events.append("BOS_UP")
+    if pump_failed:
+        events.append("PUMP_FAILED")
     if has_div:
         events.append("BEARISH_DIVERGENCE")
     if has_budiv:
@@ -275,6 +300,7 @@ def live_snapshot(
         "change_24h_pct": change_24h_pct,
         "vol_z": vol_z,
         "is_pump": is_pump,
+        "pump_failed": pump_failed,
         "compression": cm,
         "n_zones": len(zones),
         "resistance": resist_info,
