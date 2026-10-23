@@ -123,8 +123,10 @@ async def test_chat_success_with_mocked_context_and_model(monkeypatch):
         seen["context_args"] = (symbol, market, tf)
         return fake_context()
 
-    async def fake_reply(cfg, message, context, history):
+    async def fake_reply(cfg, message, context, history, **kwargs):
         seen["reply"] = (message, context.symbol, history)
+        seen["tool_runtime"] = kwargs.get("tool_runtime")
+        seen["reply_kwargs"] = kwargs
         return {
             "reply": "A measured chart read.",
             "model": "minimax-m3.1-flash",
@@ -146,6 +148,8 @@ async def test_chat_success_with_mocked_context_and_model(monkeypatch):
                 "market": "auto",
                 "tf": "15m",
                 "history": [{"role": "user", "content": "hello"}],
+                "client_now_ms": 1_792_760_399_999,
+                "client_timezone": "America/New_York",
             },
         )
     assert response.status_code == 200
@@ -154,6 +158,11 @@ async def test_chat_success_with_mocked_context_and_model(monkeypatch):
     assert seen["context_args"] == ("AAAUSDT", "futures", "15m")
     assert seen["reply"][0] == "what is the structure?"
     assert seen["reply"][2] == [{"role": "user", "content": "hello"}]
+    assert seen["tool_runtime"] is not None
+    assert seen["tool_runtime"].client_now_ms == 1_792_760_399_999
+    assert str(seen["tool_runtime"].display_tz) == "America/New_York"
+    assert seen["reply_kwargs"]["client_now_ms"] == 1_792_760_399_999
+    assert str(seen["reply_kwargs"]["client_tz"]) == "America/New_York"
     assert "api-secret" not in response.text
 
 
@@ -235,7 +244,7 @@ async def test_chat_long_history_turn_is_accepted(monkeypatch):
     async def fake_context_build(*args, **kwargs):
         return fake_context()
 
-    async def fake_reply(cfg, message, context, history):
+    async def fake_reply(cfg, message, context, history, **kwargs):
         seen["history"] = history
         return {
             "reply": "History accepted.",

@@ -7,6 +7,7 @@ never returned by the API or written to the browser.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -17,6 +18,9 @@ from .config import ChatConfig
 
 MAX_RESPONSE_BYTES = 2_000_000
 MAX_ERROR_CHARS = 240
+MAX_TOOL_CALLS = 8
+MAX_TOOL_ARG_CHARS = 8_000
+_TOOL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 _BEARER_RE = re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
 
 
@@ -41,6 +45,7 @@ class OllamaReply:
     model: str
     done_reason: str | None
     usage: dict
+    tool_calls: tuple[dict[str, Any], ...] = ()
 
 
 def _safe_detail(text: str, api_key: str = "") -> str:
@@ -77,6 +82,42 @@ def _content_text(content: Any) -> str:
     return ""
 
 
+def _normalize_tool_calls(raw: Any) -> tuple[dict[str, Any], ...]:
+    """Validate and normalize Ollama's assistant ``tool_calls`` payload.
+
+    Ollama normally returns arguments as an object, but some models emit a JSON
+    string. Both are accepted; malformed calls are dropped rather than trusted.
+    """
+    if not isinstance(raw, list):
+        return ()
+    out: list[dict[str, Any]] = []
+    for item in raw[:MAX_TOOL_CALLS]:
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        if not isinstance(name, str) or not _TOOL_NAME_RE.fullmatch(name):
+            continue
+        args = function.get("arguments")
+        if args is None:
+            args = {}
+        if isinstance(args, str):
+            if len(args) > MAX_TOOL_ARG_CHARS:
+                continue
+            try:
+                args = json.loads(args)
+            except ValueError:
+                continue
+        if not isinstance(args, dict):
+            continue
+        if len(json.dumps(args, separators=(",", ":"), default=str)) > MAX_TOOL_ARG_CHARS:
+            continue
+        out.append({"function": {"name": name, "arguments": args}})
+    return tuple(out)
+
+
 class OllamaCloudClient:
     def __init__(
         self,
@@ -92,7 +133,13 @@ class OllamaCloudClient:
         self.config = config
         self._transport = transport
 
-    async def chat(self, messages: list[dict], *, max_tokens: int | None = None) -> OllamaReply:
+    async def chat(
+        self,
+        messages: list[dict],
+        *,
+        max_tokens: int | None = None,
+        tools: list[dict] | None = None,
+    ) -> OllamaReply:
         if not isinstance(messages, list) or not messages:
             raise OllamaCloudError("chat messages must be a non-empty list", status_code=500)
 
@@ -106,6 +153,10 @@ class OllamaCloudClient:
                 "num_predict": max_tokens or self.config.max_tokens,
             },
         }
+        if tools:
+            if not isinstance(tools, list):
+                raise OllamaCloudError("tools must be a list", status_code=500)
+            payload["tools"] = tools
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
@@ -156,7 +207,10 @@ class OllamaCloudClient:
 
         message = data.get("message")
         content = _content_text(message.get("content") if isinstance(message, dict) else None)
-        if not content:
+        tool_calls = _normalize_tool_calls(
+            message.get("tool_calls") if isinstance(message, dict) else None
+        )
+        if not content and not tool_calls:
             raise OllamaCloudError("Ollama Cloud returned an empty message", status_code=502)
 
         total_ns = data.get("total_duration")
@@ -170,4 +224,5 @@ class OllamaCloudClient:
             model=str(data.get("model") or self.config.model)[:120],
             done_reason=str(data.get("done_reason"))[:40] if data.get("done_reason") else None,
             usage=usage,
+            tool_calls=tool_calls,
         )

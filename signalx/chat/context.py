@@ -25,6 +25,7 @@ from ..ema import CASCADE_TFS, TfInfo, cascade_pattern, tf_crosses
 from ..feeds import TF_MS, fetch_klines, poll_snapshot
 from ..journal import SignalJournal
 from ..overlays import MIN_BARS, OverlayError, build_overlays
+from .timeutil import local_iso, local_label, local_zone
 
 CONTEXT_CACHE_TTL_MS = 15_000
 CONTEXT_CACHE_MAX = 32
@@ -51,6 +52,9 @@ class ChartContext:
             "tf": self.tf,
             "as_of": _iso(self.as_of_ms),
             "as_of_ms": self.as_of_ms,
+            "system_time": local_iso(self.as_of_ms),
+            "system_time_label": local_label(self.as_of_ms),
+            "timezone": local_zone(),
             "data_quality": self.payload.get("data_quality", {}),
         }
 
@@ -654,6 +658,12 @@ async def build_chart_context(
     window_low = min(k.low for k in window)
     payload = {
         "as_of": _iso(now_ms),
+        "system_time": local_iso(now_ms),
+        "system_time_label": local_label(now_ms),
+        "market_time": local_iso(rows[-1].close_time),
+        "market_time_label": local_label(rows[-1].close_time),
+        "market_time_ms": rows[-1].close_time,
+        "timezone": local_zone(),
         "symbol": symbol,
         "market": market,
         "timeframe": tf,

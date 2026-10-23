@@ -78,6 +78,36 @@ def test_history_is_bounded_and_system_roles_dropped():
     assert len(messages) <= 12
 
 
+def test_tool_policy_only_when_enabled():
+    plain = build_messages("explain the flow", context())[0]["content"]
+    enabled = build_messages("explain the flow", context(), tools_enabled=True)[0]["content"]
+    assert "READ-ONLY EVIDENCE TOOLS" not in plain
+    assert "READ-ONLY EVIDENCE TOOLS" in enabled
+    assert "get_sniper" in enabled
+    assert "never turn a decision into an order instruction" in enabled
+    assert "system_time_label" in enabled
+    assert "market_time_label" in enabled
+    assert "Do not append \"Z\"" in enabled
+
+
+def test_client_clock_overrides_packet_times_without_mutating_context():
+    from zoneinfo import ZoneInfo
+
+    ctx = context()
+    before = dict(ctx.payload)
+    messages = build_messages(
+        "what time is that?",
+        ctx,
+        client_now_ms=1_792_760_399_999,
+        client_tz=ZoneInfo("America/New_York"),
+    )
+    text = messages[-1]["content"]
+    assert "USER SYSTEM CLOCK: 2026-10-23 08:59:59 EDT" in text
+    assert '"system_time_label":"2026-10-23 08:59:59 EDT"' in text
+    assert '"timezone":"EDT (UTC-04:00)"' in text
+    assert ctx.payload == before
+
+
 def test_empty_and_oversized_messages_rejected():
     with pytest.raises(ChatRequestError):
         build_messages("   ", context())

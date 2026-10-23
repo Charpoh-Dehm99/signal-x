@@ -101,12 +101,28 @@ const Chat = (() => {
     empty.className = "chat-empty";
     empty.textContent =
       "I'm your chart partner. Ask about structure, patterns, EMA alignment, RSI/divergence, " +
-      "volume, funding/OI or order flow. I'll stay evidence-first and flag what would " +
-      "invalidate the read. The model thinks before answering; complex charts can take 1–3 minutes.";
+      "volume, funding/OI or order flow. I can also pull gainers, other symbols, journal " +
+      "signals, SNIPER diagnostics and paper state through read-only tools. " +
+      "The model thinks before answering; complex charts can take 1–3 minutes.";
     el.log.appendChild(empty);
   }
 
-  function addMessage(role, text, skills) {
+  function toolLabel(call) {
+    const labels = {
+      get_gainers: "Gainers",
+      get_snapshot: "Snapshot",
+      get_signals: "Signals",
+      get_sniper: "SNIPER",
+      get_sniper_watchlist: "SNIPER watchlist",
+      get_paper: "Paper",
+    };
+    const name = call && call.name ? String(call.name) : "tool";
+    const args = call && call.arguments;
+    const symbol = args && typeof args === "object" && args.symbol ? String(args.symbol) : "";
+    return (labels[name] || name) + (symbol ? " · " + symbol : "");
+  }
+
+  function addMessage(role, text, skills, tools) {
     if (!el.log) return null;
     const wrap = document.createElement("div");
     wrap.className = "chat-msg " + role;
@@ -124,6 +140,17 @@ const Chat = (() => {
       const names = skills.slice(0, 5).map((s) => s.name || s.id).filter(Boolean);
       foot.textContent = skills.length + " lenses · " + names.join(" · ") +
         (skills.length > names.length ? " · +" + (skills.length - names.length) : "");
+      wrap.appendChild(foot);
+    }
+    if (Array.isArray(tools) && tools.length) {
+      const foot = document.createElement("div");
+      foot.className = "tools";
+      for (const call of tools.slice(0, 6)) {
+        const chip = document.createElement("span");
+        chip.className = "chat-tool" + (call && call.ok === false ? " bad" : "");
+        chip.textContent = toolLabel(call);
+        foot.appendChild(chip);
+      }
       wrap.appendChild(foot);
     }
     el.log.appendChild(wrap);
@@ -251,7 +278,10 @@ const Chat = (() => {
     const tf = (app && app.tf) || "5m";
     const market = (app && app.market) || "auto";
     el.context.textContent = sym ? sym + " · " + tf + " · " + market : "load a chart to begin";
-    const key = sym ? sym + "|" + tf : null;
+    // Keep the conversation when only the timeframe/market changes. The next
+    // request already carries the fresh chart packet; a symbol change is a
+    // different conversation and still starts clean.
+    const key = sym || null;
     if (key !== ui.ctxKey) {
       ui.ctxKey = key;
       resetConversation();
@@ -304,13 +334,17 @@ const Chat = (() => {
     const tf = app.tf || "5m";
     el.input.value = "";
     addMessage("user", message);
-    const typing = addMessage("assistant", "Thinking through the chart packet — M3.1 Flash can take 1–3 minutes.", []);
+    const typing = addMessage("assistant", "Reading the chart and checking SIGNAL-X evidence — M3.1 Flash can take 1–3 minutes.", []);
     if (typing) typing.classList.add("chat-typing");
     setBusy(true);
 
     const controller = new AbortController();
     ui.abort = controller;
     const timer = setTimeout(() => controller.abort(), 310000);
+    let clientTimezone = "";
+    try {
+      clientTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+    } catch { /* fall back to the server timezone */ }
     try {
       const response = await fetch("/api/chat", {
         method: "POST",
@@ -320,6 +354,8 @@ const Chat = (() => {
           symbol,
           market,
           tf,
+          client_now_ms: Date.now(),
+          client_timezone: clientTimezone,
           history: ui.history.slice(-8).map((turn) => ({
             role: turn.role,
             content: String(turn.content || "").slice(0, 4000),
@@ -331,7 +367,7 @@ const Chat = (() => {
       if (!response.ok) throw new Error(errorDetail(data, response.status));
       if (typing) typing.remove();
       const reply = (data && data.reply) || "No reply returned.";
-      addMessage("assistant", reply, data && data.skills);
+      addMessage("assistant", reply, data && data.skills, data && data.tool_calls);
       ui.history.push({ role: "user", content: message });
       ui.history.push({ role: "assistant", content: reply });
       ui.history = ui.history.slice(-8);

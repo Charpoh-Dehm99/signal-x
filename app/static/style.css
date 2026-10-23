@@ -126,10 +126,35 @@ b, .num, .price, .chg, td, .k { font-variant-numeric: tabular-nums; }
   gap: 20px; align-items: start;
   padding: 0 clamp(14px, 2.5vw, 28px);
 }
-body.big-chart .dash { grid-template-columns: minmax(0, 1fr); }
+body.big-chart .dash {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "chart" "ta" "signals" "paper";
+}
 body.big-chart .rail-left, body.big-chart .rail-right { display: none; }
+body.big-chart .center { display: contents; }
+body.big-chart .center > .card { grid-area: chart; }
+body.big-chart .center > .ta { grid-area: ta; }
+body.big-chart .signal-wrap { grid-area: signals; padding: 0; }
+body.big-chart .paper-wrap { grid-area: paper; padding: 0; }
 .signal-wrap { padding: 20px clamp(14px, 2.5vw, 28px) 0; }
 .rail-left, .center, .rail-right { display: grid; gap: 20px; min-width: 0; }
+
+@media (min-width: 1421px) {
+  .dash {
+    grid-template-areas:
+      "left chart right"
+      "left ta right"
+      "left signals right"
+      "left paper right";
+  }
+  .center { display: contents; }
+  .center > .card { grid-area: chart; }
+  .center > .ta { grid-area: ta; }
+  .rail-left { grid-area: left; }
+  .rail-right { grid-area: right; }
+  .signal-wrap { grid-area: signals; padding: 0; }
+  .paper-wrap { grid-area: paper; padding: 0; }
+}
 
 /* ------------------------------------------------ cards */
 .card {
@@ -505,14 +530,26 @@ table.signals td.empty { color: var(--muted); padding: 16px 10px; }
 
 /* ------------------------------------------------ responsive */
 @media (max-width: 1420px) {
-  .dash { grid-template-columns: 240px minmax(0, 1fr); grid-template-areas: "left center" "left right"; }
+  .dash {
+    grid-template-columns: 240px minmax(0, 1fr);
+    grid-template-areas:
+      "left center"
+      "left right"
+      "signals signals"
+      "paper paper";
+  }
   .rail-left { grid-area: left; } .center { grid-area: center; } .rail-right { grid-area: right; }
+  .signal-wrap { grid-area: signals; }
+  .paper-wrap { grid-area: paper; }
   .rail-right { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
   .rail-right .obs-card { grid-column: 1 / -1; }
   .gainers { max-height: 420px; }
 }
 @media (max-width: 980px) {
-  .dash { grid-template-columns: minmax(0, 1fr); grid-template-areas: "center" "left" "right"; }
+  .dash {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "center" "left" "right" "signals" "paper";
+  }
   .ta { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .rail-right { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
@@ -657,6 +694,15 @@ table.signals td.empty { color: var(--muted); padding: 16px 10px; }
   margin-top: 7px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,.06);
   color: #7f7f89; font-size: 9.5px; line-height: 1.4;
 }
+.chat-msg .tools {
+  display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; padding-top: 6px;
+  border-top: 1px solid rgba(255,255,255,.06);
+}
+.chat-tool {
+  color: #9f8bd4; background: rgba(180,139,255,.08); border: 1px solid rgba(180,139,255,.18);
+  border-radius: 5px; padding: 1px 5px; font-size: 9px; line-height: 1.45;
+}
+.chat-tool.bad { color: #ffb86b; background: rgba(255,164,46,.06); border-color: rgba(255,164,46,.2); }
 .chat-typing .text::after {
   content: "…"; display: inline-block; width: 1em; animation: chatdots 1.2s steps(3,end) infinite;
 }

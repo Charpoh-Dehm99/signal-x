@@ -87,12 +87,15 @@ from signalx.chat import (  # noqa: E402
     ChartContextError,
     ChatRequestError,
     OllamaCloudError,
+    TOOL_SPECS,
+    ToolRuntime,
     build_chart_context,
     generate_reply,
     public_models,
     public_skills,
     save_chat_model,
 )
+from signalx.chat.timeutil import resolve_timezone  # noqa: E402
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 JOURNAL_DIR = Path(os.environ.get("SIGNALX_JOURNAL_DIR", str(ROOT / "data" / "journal")))
@@ -144,6 +147,11 @@ class ChatRequest(BaseModel):
     market: Literal["auto", "spot", "futures"] = "auto"
     tf: str = Field(default="5m", max_length=8)
     history: list[ChatTurn] = Field(default_factory=list, max_length=10)
+    # Display-only clock from the browser. It never changes market data,
+    # validation or trading logic; it only formats timestamps in the user's
+    # system timezone.
+    client_now_ms: int | None = Field(default=None, ge=0, le=4_102_444_800_000)
+    client_timezone: str | None = Field(default=None, max_length=64)
 
 
 class ChatModelRequest(BaseModel):
@@ -341,6 +349,8 @@ async def chat_status() -> dict:
         "skills": len(CHART_SKILLS),
         "max_skills": MAX_SKILLS,
         "max_history": 10,
+        "tools": [spec["function"]["name"] for spec in TOOL_SPECS],
+        "tool_mode": "read-only",
     }
 
 
@@ -358,6 +368,8 @@ async def set_chat_model(req: ChatModelRequest) -> dict:
         "skills": len(CHART_SKILLS),
         "max_skills": MAX_SKILLS,
         "max_history": 10,
+        "tools": [spec["function"]["name"] for spec in TOOL_SPECS],
+        "tool_mode": "read-only",
     }
 
 
@@ -370,13 +382,15 @@ async def chat_skills() -> dict:
 @app.post("/api/chat")
 async def chat(
     req: ChatRequest,
+    request: Request,
     client: httpx.AsyncClient = Depends(get_client),
 ) -> dict:
-    """Interpret the current chart with MiniMax-M3.1 Flash via Ollama Cloud.
+    """Interpret the chart with MiniMax-M3.1 Flash via Ollama Cloud.
 
     The chart packet is built server-side from the same validated feeds and
-    closed-bar engines as the dashboard. Chat history is capped and sanitized;
-    the model cannot request tools or fetch additional data.
+    closed-bar engines as the dashboard. The model may call the read-only
+    SIGNAL-X/SNIPER tools; it cannot place orders, change state or fetch
+    arbitrary URLs. Chat history is capped and sanitized.
     """
     try:
         cfg = ChatConfig.from_env()
@@ -391,6 +405,7 @@ async def chat(
     sym = _clean_symbol(req.symbol)
     tf = _clean_chart_tf(req.tf)
     market = req.market
+    display_tz = resolve_timezone(req.client_timezone)
     try:
         if market == "auto":
             market = await detect_market(client, sym)
@@ -402,11 +417,23 @@ async def chat(
             int(time.time() * 1000),
             journal_dir=JOURNAL_DIR,
         )
+        runtime = ToolRuntime(
+            client=client,
+            journal_dir=JOURNAL_DIR,
+            sniper_store=sniper_store,
+            sniper_monitor=getattr(request.app.state, "sniper_monitor", None),
+            paper_reader=paper,
+            display_tz=display_tz,
+            client_now_ms=req.client_now_ms,
+        )
         return await generate_reply(
             cfg,
             req.message,
             context,
             [turn.model_dump() for turn in req.history],
+            tool_runtime=runtime,
+            client_now_ms=req.client_now_ms,
+            client_tz=display_tz,
         )
     except ChatRequestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

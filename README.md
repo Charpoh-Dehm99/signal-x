@@ -181,8 +181,20 @@ mark the bias of the observation — not an entry.
 
 The trading-partner drawer sends a question to the server, which builds a compact packet
 from the same validated feeds and closed-bar engines as the dashboard, selects
-up to 22 of 36 chart lenses, and calls Ollama Cloud model `minimax-m3.1-flash`. The
-model gets no tools and no client-supplied chart data. It is asked for a
+up to 22 of 36 chart lenses, and calls the configured Ollama Cloud model. The
+model may also call a small set of **read-only SIGNAL-X tools** when the packet
+is insufficient: `get_gainers`, `get_snapshot`, `get_signals`, `get_sniper`,
+`get_sniper_watchlist` and `get_paper`. These run in-process against the same
+validated feeds, journal, SNIPER engine and paper state as the dashboard; the
+model cannot place orders, halt paper, change settings, assign watchlist
+symbols or fetch arbitrary URLs. Tool calls are bounded (four rounds, three
+calls per round, 60s per call, result-size caps) and each result is returned to
+the UI as a small chip. Tool output is treated as data, never instructions.
+Human-readable timestamps are preformatted in the browser's system timezone
+(clock plus IANA zone; server timezone is the fallback) with explicit zone
+labels (`*_local`, `*_label`, `timezone`); the model is told not to append `Z`
+or silently convert them to UTC.
+It is asked for a
 structured **Read / Evidence / Conflict / Scenarios / Invalidation / Caveats**
 answer with exact levels. The **Read** section includes a **Pattern** line that
 names only structures supported by the packet's pivots and candles, with a
@@ -298,9 +310,9 @@ Read-only, JSON, same-origin (no CORS).
 | `GET /api/paper` | Paper companion state: equity, realized/unrealized P&L, open paper positions, recent exits, halt status, companion heartbeat (read-only) |
 | `POST /api/paper/halt` | Creates the paper-entry kill switch file; blocks new paper entries only, never touches an exchange |
 | `GET /api/logos?symbols=BTC,ETH,...` | Cosmetic CoinGecko icon map (cached, always 200) |
-| `GET /api/chat/status` | Chat readiness, model, skill count; never the key |
+| `GET /api/chat/status` | Chat readiness, model, skill count and read-only tool names; never the key |
 | `GET /api/chat/skills` | Public 36-lens catalog (no internal instructions/triggers) |
-| `POST /api/chat` | Server-side Ollama Cloud chart analysis; `503` without a key |
+| `POST /api/chat` | Server-side Ollama Cloud chart analysis with bounded read-only tools; `503` without a key |
 | `POST /api/chat/model` | Persist `{model}` for subsequent chat requests; no key required |
 
 Symbols must match `^[A-Z0-9]{4,20}$` and intervals are whitelisted; invalid
@@ -322,7 +334,10 @@ resistance zones, latest 4 divergences per direction. `avwap.anchor_mode` is
 display anchor (hindsight) that is never fed back as a signal input.
 
 `POST /api/chat` accepts `{message, symbol, market, tf, history}`; the chart
-packet is built server-side, not accepted from the client. `POST /api/chat/model`
+packet is built server-side, not accepted from the client. The model may call
+the read-only tools listed in `/api/chat/status`; the response includes
+`tool_calls` metadata (name, arguments, ok/error) for UI chips. Tools are
+in-process and cannot write state or place orders. `POST /api/chat/model`
 accepts `{model}` and writes the normalized model id to the model file; invalid
 or unsafe ids return `400`. Chat errors map to
 `400` (bad symbol/timeframe), `422` (request validation), `429` (Ollama rate

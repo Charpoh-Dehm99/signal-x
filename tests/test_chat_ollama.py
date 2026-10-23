@@ -116,3 +116,101 @@ def test_missing_key_cannot_construct_client():
     with pytest.raises(OllamaCloudError) as excinfo:
         OllamaCloudClient(cfg(api_key=""))
     assert excinfo.value.status_code == 503
+
+
+@pytest.mark.anyio
+async def test_tools_payload_and_tool_calls_are_parsed():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "model": "minimax-m3.1-flash",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "get_gainers",
+                                "arguments": {"top": 3},
+                            }
+                        }
+                    ],
+                },
+                "done_reason": "tool_calls",
+            },
+        )
+
+    tools = [{"type": "function", "function": {"name": "get_gainers", "parameters": {}}}]
+    client = OllamaCloudClient(cfg(), transport=httpx.MockTransport(handler))
+    reply = await client.chat([{"role": "user", "content": "hi"}], tools=tools)
+
+    assert seen["body"]["tools"] == tools
+    assert reply.content == ""
+    assert reply.tool_calls[0]["function"]["name"] == "get_gainers"
+    assert reply.tool_calls[0]["function"]["arguments"] == {"top": 3}
+
+
+@pytest.mark.anyio
+async def test_string_tool_arguments_are_normalized():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "message": {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "get_sniper",
+                                "arguments": '{"symbol":"ETHUSDT"}',
+                            }
+                        }
+                    ]
+                }
+            },
+        )
+
+    client = OllamaCloudClient(cfg(), transport=httpx.MockTransport(handler))
+    reply = await client.chat([{"role": "user", "content": "hi"}], tools=[{"type": "function"}])
+    assert reply.tool_calls[0]["function"]["arguments"] == {"symbol": "ETHUSDT"}
+
+
+@pytest.mark.anyio
+async def test_null_tool_arguments_become_empty_object():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "message": {
+                    "tool_calls": [
+                        {"function": {"name": "get_sniper_watchlist", "arguments": None}}
+                    ]
+                }
+            },
+        )
+
+    client = OllamaCloudClient(cfg(), transport=httpx.MockTransport(handler))
+    reply = await client.chat([{"role": "user", "content": "hi"}], tools=[{"type": "function"}])
+    assert reply.tool_calls[0]["function"]["arguments"] == {}
+
+
+@pytest.mark.anyio
+async def test_malformed_tool_call_without_content_is_502():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "message": {
+                    "tool_calls": [
+                        {"function": {"name": "../../bad", "arguments": {}}}
+                    ]
+                }
+            },
+        )
+
+    client = OllamaCloudClient(cfg(), transport=httpx.MockTransport(handler))
+    with pytest.raises(OllamaCloudError):
+        await client.chat([{"role": "user", "content": "hi"}], tools=[{"type": "function"}])

@@ -123,6 +123,10 @@ async def test_builds_compact_packet_and_caches(monkeypatch, tmp_path):
     assert first.payload["levels"]["above"] or first.payload["levels"]["below"]
     assert first.meta()["symbol"] == "AAAUSDT"
     assert first.meta()["tf"] == "15m"
+    assert first.meta()["system_time_label"]
+    assert "UTC" in first.meta()["timezone"]
+    assert first.payload["market_time_label"]
+    assert "UTC" in first.payload["timezone"]
 
 
 @pytest.mark.anyio
