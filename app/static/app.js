@@ -39,7 +39,7 @@ const ST_ABBR = { TRIGGERED: "TRIG", IN_TRADE: "TRADE", ARMED: "ARM", PLATEAU_BU
 const state = {
   sym: null, market: null, tf: localStorage.getItem("sx_tf") || "5m",
   mode: localStorage.getItem("sx_mode") || "candle",
-  gen: 0, es: null, tailTimer: null, ovTimer: null, emaTimer: null, tailBusy: false,
+  gen: 0, es: null, tailTimer: null, ovTimer: null, emaTimer: null, cdTimer: null, tailBusy: false,
   lastPrice: null, ov: null, candles: [],
 };
 
@@ -1418,6 +1418,59 @@ function showHeaderPrice(cs) {
   $("price-note").textContent = "close \u00b7 " + state.tf;
 }
 
+/* Bar-close countdown, TradingView style: time left in the live candle.
+   The clock is wall-aligned, so it stays right even while a new symbol or
+   timeframe is loading and the last candle still belongs to the old view. */
+function tfStepMs(tf) {
+  const m = /^(\d+)([mhd])$/.exec(String(tf || ""));
+  if (!m) return 0;
+  const unit = { m: 60000, h: 3600000, d: 86400000 }[m[2]];
+  return Number(m[1]) * unit;
+}
+
+function fmtCountdown(ms) {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  return h ? h + ":" + pad(m) + ":" + pad(s) : pad(m) + ":" + pad(s);
+}
+
+function updateCountdown() {
+  const el = $("tf-count");
+  const val = $("tf-count-val");
+  if (!el || !val) return;
+  const step = tfStepMs(state.tf);
+  if (!step) {
+    if (val.textContent !== "--:--") val.textContent = "--:--";
+    return;
+  }
+  const now = Date.now();
+  const last = state.candles.length ? state.candles[state.candles.length - 1] : null;
+  let closeAt = Math.floor(now / step) * step + step;
+  if (last && last.t % step === 0 && last.t <= now && now < last.t + step) {
+    closeAt = last.t + step;
+  }
+  const left = Math.max(0, closeAt - now);
+  const text = fmtCountdown(left);
+  if (val.textContent === text) return;
+  val.textContent = text;
+  el.classList.toggle("closing", left > 0 && left <= 10000);
+  const at = new Date(closeAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  el.title = state.tf + " candle closes in " + text + " \u00b7 " + at;
+  el.setAttribute("aria-label", state.tf + " candle closes in " + text);
+}
+
+function startCountdown() {
+  if (state.cdTimer) return;
+  updateCountdown();
+  state.cdTimer = setInterval(updateCountdown, 250);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) updateCountdown();
+  });
+}
+
 function stopLive() {
   if (state.es) { state.es.close(); state.es = null; }
   if (state.tailTimer) { clearInterval(state.tailTimer); state.tailTimer = null; }
@@ -1442,6 +1495,7 @@ async function loadChart(sym, gen, keepView) {
   state.market = kd.market;
   if (window.Chat) Chat.syncContext();
   state.candles = kd.candles;
+  updateCountdown();
   $("mkt").textContent = kd.market + " \u00b7 " + kd.tf;
   let ov = null;
   if (or_ && or_.ok) {
@@ -1652,6 +1706,7 @@ function init() {
   if (big) big.addEventListener("click", toggleBig);
   applyBig(localStorage.getItem(BIG_KEY) === "1", false);
   ChartX.init($("chart"), $("tip"), $("chart-status"));
+  startCountdown();
   const toggles = currentToggles();
   applyToggles(toggles, false);
   document.querySelectorAll("#overlay-bar .chip[data-ov]").forEach((chip) => {
@@ -1669,6 +1724,7 @@ function init() {
   bindSeg("#tf", "t", (t) => {
     state.tf = t;
     localStorage.setItem("sx_tf", t);
+    updateCountdown();
     if (state.sym) selectSymbol(state.sym);
   });
 

@@ -202,6 +202,18 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--blue); outl
 .live.stale { color: var(--orange); }
 .live.stale .dot { background: var(--orange); box-shadow: 0 0 8px var(--orange); }
 @keyframes blink { 50% { opacity: .3; } }
+.tf-count {
+  display: inline-flex; align-items: center; gap: 5px;
+  font: 600 11px/1 var(--font); color: var(--muted);
+  padding: 4px 7px; border-radius: 7px; white-space: nowrap;
+  background: rgba(255,255,255,.025);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.07);
+  font-variant-numeric: tabular-nums;
+}
+.tf-count svg { width: 11px; height: 11px; flex: none; opacity: .75; }
+.tf-count #tf-count-val { color: var(--text); letter-spacing: .2px; }
+.tf-count.closing { color: var(--orange); box-shadow: inset 0 0 0 1px rgba(255,164,46,.3); }
+.tf-count.closing #tf-count-val { color: var(--orange); }
 .price-line { display: flex; align-items: baseline; gap: 11px; margin-top: 7px; flex-wrap: wrap; }
 .price { font-size: clamp(24px, 2.6vw, 32px); font-weight: 600; letter-spacing: -.5px; }
 .chg { font-size: 13px; font-weight: 600; }
@@ -230,8 +242,12 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--blue); outl
 }
 .chip-note.hot { color: var(--down-l); box-shadow: inset 0 0 0 1px rgba(242,54,69,.35); }
 
-.chart-wrap { position: relative; height: clamp(380px, 56vh, 580px); margin-top: 12px; touch-action: none; }
-.chart-wrap canvas { display: block; width: 100%; height: 100%; cursor: crosshair; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.chart-wrap { position: relative; height: clamp(380px, 56vh, 580px); margin-top: 12px; touch-action: none; overscroll-behavior: contain; }
+.chart-wrap canvas {
+  display: block; width: 100%; height: 100%; cursor: crosshair;
+  touch-action: none; user-select: none; -webkit-user-select: none;
+  -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+}
 .tip {
   position: absolute; pointer-events: none; min-width: 168px; padding: 11px 13px; border-radius: 12px;
   background: rgba(20,20,23,.82); backdrop-filter: blur(14px) saturate(1.3); -webkit-backdrop-filter: blur(14px) saturate(1.3);

@@ -25,44 +25,83 @@ const ChartX = (() => {
   let hoverI = null, hoverY = null;
   let raf = 0;
   let animRaf = 0;
-  const MIN_BARS = 24;          // hard zoom-in limit
-  const MIN_BAR_PX = 4;         // candle-mode fit: never cram bars into <4px slots
+  const MIN_BARS = 10;          // deep zoom-in limit (TradingView-like few-bar view)
+  const DEFAULT_BAR_PX = 6;     // fit density: readable candles, never a solid wall
   let view = { start: 0, count: 0 };  // visible window over candles (count 0 = all)
-  let drag = null;
+  let drag = null;              // mouse plot drag
+  let pan = null;               // touch drag/axis drag state
   let vScrollPx = 0;            // manual vertical (price) scroll offset in px
+  let vScale = 1;               // price-axis stretch (1 = auto-fit)
   let touches = new Map();      // active touch pointers (pointerId -> {x,y})
   let pinch = null;             // two-finger gesture baseline {cx, cy, dist}
   let wheelBurst = null;        // { t, mode } classifies wheel vs trackpad bursts
-  let lastTap = null;           // { t, x, y } last single-finger tap (double-tap zoom)
-  let tapZoomAt = 0;            // suppress the synthesized dblclick after a touch double-tap
+  let lastTap = null;           // { t, x, y, zone } last touch tap (double-tap reset)
+  let tapZoomAt = 0;            // suppress the synthesized dblclick after a touch tap
+  let longPress = null;         // { timer, x, y, id } pending crosshair activation
+  let touchTracking = false;    // long-press crosshair mode (TV "tracking mode")
+  let trackingMoved = false;
+  let suppressPan = false;      // after a pinch, until every finger lifts
+  let axisDrag = null;          // mouse price/time scale drag
+  let tween = null, tweenRaf = 0;
+  let kinetic = null, kineticRaf = 0;
 
   /* ------------------------------------------------ view window */
+  function defaultViewCount() {
+    const n = candles.length || 1;
+    const minC = Math.min(MIN_BARS, n);
+    if (!W) return minC;
+    return clamp(Math.round(plotWidth() / DEFAULT_BAR_PX), minC, n);
+  }
+  /* TradingView-style right margin: the live candle sits a few slots left of
+     the price axis instead of being glued to it */
+  function rightPadBars(vc) {
+    const n = candles.length || 1;
+    return Math.min(clamp(Math.round(vc * 0.08), 2, 12), Math.max(0, n - vc));
+  }
+  function liveStart(vc) {
+    const n = candles.length || 1;
+    return Math.max(0, n - vc + rightPadBars(vc));
+  }
+  /* you may scroll into future whitespace (TV lets you park the chart right
+     of the live bar); at least a handful of candles stay on screen */
+  function maxStart(vc) {
+    const n = candles.length || 1;
+    return Math.max(liveStart(vc), n - Math.min(vc, 6));
+  }
   function viewCount() {
     const n = candles.length || 1;
     return clamp(view.count > 0 ? view.count : n, Math.min(MIN_BARS, n), n);
   }
-  /* max bars that still render readable candles: phones get ~60-70 bars
-     instead of smearing 300 into a solid wall of stacked 1px bars */
-  function maxViewCount() {
-    const n = candles.length || 1;
-    const minC = Math.min(MIN_BARS, n);
-    if (mode !== "candle" || !W) return n;
-    return clamp(Math.floor(plotWidth() / MIN_BAR_PX), minC, n);
-  }
   function fitView() {
     const n = candles.length;
-    view.count = n ? maxViewCount() : 0;
-    view.start = Math.max(0, n - view.count);
+    view.count = n ? defaultViewCount() : 0;
+    view.start = n ? liveStart(view.count) : 0;
     vScrollPx = 0;
+    vScale = 1;
   }
   function clampView() {
     const n = candles.length || 1;
-    view.count = clamp(view.count || n, Math.min(MIN_BARS, n), maxViewCount());
-    view.start = clamp(view.start, 0, Math.max(0, n - view.count));
+    view.count = clamp(view.count || defaultViewCount(), Math.min(MIN_BARS, n), n);
+    const leftPad = Math.min(6, Math.floor(view.count * 0.1));
+    view.start = clamp(view.start, -leftPad, maxStart(view.count));
   }
-  function resetView() { fitView(); pinch = null; schedule(); }
-  function atRightEdge() { return view.start + viewCount() >= candles.length - 0.01; }
-  function getView() { return { start: view.start, count: viewCount(), vScroll: vScrollPx }; }
+  function resetView(animate) {
+    const n = candles.length;
+    if (!n) { fitView(); schedule(); return; }
+    const count = defaultViewCount();
+    const to = { start: liveStart(count), count: count, vScroll: 0, vScale: 1 };
+    stopKinetic();
+    if (animate === false) {
+      view.start = to.start; view.count = to.count; vScrollPx = 0; vScale = 1;
+      schedule();
+      return;
+    }
+    animateTo(to, 280);
+  }
+  function atRightEdge() {
+    return candles.length > 0 && Math.abs(view.start - liveStart(viewCount())) < 0.4;
+  }
+  function getView() { return { start: view.start, count: viewCount(), vScroll: vScrollPx, vScale: vScale }; }
 
   /* ------------------------------------------------ helpers */
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -133,15 +172,21 @@ const ChartX = (() => {
 
   function setData(cs, overlays, interval, opts) {
     const keep = !!(opts && opts.keepView) && interval === tf && candles.length > 0;
-    const anchorT = keep ? candles[clamp(Math.round(view.start), 0, candles.length - 1)].t : null;
+    const wasLive = keep && atRightEdge();
+    const anchorI = keep ? clamp(Math.round(view.start), 0, candles.length - 1) : 0;
+    const anchorT = keep ? candles[anchorI].t : null;
+    const anchorFrac = keep ? view.start - anchorI : 0;
     candles = Array.isArray(cs) ? cs : [];
     ov = overlays || null;
     tf = interval || tf;
     if (candles.length > 1) stepMs = candles[1].t - candles[0].t;
     hoverI = null;
+    touchTracking = false;
+    trackingMoved = false;
     indexByTime();
     if (anchorT != null && timeIdx.has(anchorT)) {
-      view.start = timeIdx.get(anchorT);   // same window, shifted data
+      view.start = timeIdx.get(anchorT) + anchorFrac;   // same window, shifted data
+      if (wasLive) view.start = liveStart(viewCount()); // stay parked on the live edge
     } else {
       fitView();                           // fresh symbol/timeframe: right edge, readable
     }
@@ -154,7 +199,7 @@ const ChartX = (() => {
 
   function updateTail(fresh) {
     if (!fresh || !fresh.length) return;
-    const wasRight = atRightEdge();
+    const wasLive = atRightEdge();
     let added = 0;
     for (const k of fresh) {
       const i = timeIdx.get(k.t);
@@ -173,16 +218,19 @@ const ChartX = (() => {
       timeIdx.forEach((v, key) => timeIdx.set(key, v - 1));
       dropped++;
     }
-    view.start -= dropped;
-    if (wasRight) view.start += added;   // stay glued to the live edge
+    if (wasLive) view.start = liveStart(viewCount());  // stay parked on the live edge
+    else view.start -= dropped;                         // keep the same history window
     clampView();
     draw();
   }
 
   function setMode(m) {
-    const wasRight = atRightEdge();
+    const wasLive = atRightEdge();
+    const wasFit = Math.abs(viewCount() - defaultViewCount()) < 0.5;
     mode = m;
-    if (wasRight) fitView();   // stay glued to the live edge at the new density
+    if (wasLive && wasFit) fitView();       // refit to the new density at the live edge
+    else if (wasLive) view.start = liveStart(viewCount());
+    clampView();
     draw();
   }
   function setToggles(next) { show = Object.assign({}, show, next); draw(); }
@@ -239,7 +287,14 @@ const ChartX = (() => {
     if (!isFinite(lo) || hi <= lo) { lo = lo || 1; hi = lo * 1.001 + 0.001; }
     const span = hi - lo, padv = span * 0.06;
     lo -= padv; hi += padv;
-    /* two-finger vertical scroll: shift the auto-scaled price range */
+    /* price-axis stretch: vScale > 1 compresses the range (zoom in) around
+       the visible midpoint; 1 is the auto-fit baseline */
+    if (vScale !== 1) {
+      const mid = (hi + lo) / 2;
+      const half = (hi - lo) / (2 * vScale);
+      lo = mid - half; hi = mid + half;
+    }
+    /* drag-scroll: shift the auto-scaled price range */
     if (vScrollPx) {
       const vs = vScrollPx * (hi - lo) / g.main.h;
       lo -= vs; hi -= vs;
@@ -278,9 +333,15 @@ const ChartX = (() => {
       prevLabelText = text;
     }
     ctx.textAlign = "center";
-    for (let k = 0; k <= 5; k++) {
-      const i = clamp(Math.round(view.start + k * (g.vc - 1) / 5), i0, i1);
-      ctx.fillText(tLabel(candles[i].t), clamp(x(i), 22, W - PAD.r - 6), H - PAD.b + 12);
+    const nLabels = clamp(Math.floor(plotW / 76), 2, 6);
+    let prevTimeText = "";
+    for (let k = 0; k <= nLabels; k++) {
+      const i = Math.round(view.start + k * (g.vc - 1) / nLabels);
+      if (i < 0 || i >= n) continue;               // future whitespace has no label
+      const text = tLabel(candles[i].t);
+      if (text === prevTimeText) continue;
+      ctx.fillText(text, clamp(x(i), 22, W - PAD.r - 6), H - PAD.b + 12);
+      prevTimeText = text;
     }
     if (g.rsi) {
       ctx.strokeStyle = GRID; ctx.setLineDash([3, 5]);
@@ -414,23 +475,27 @@ const ChartX = (() => {
     const lastDirUp = n > 1 ? candles[n - 1].c >= candles[n - 1].o : true;
     const col = (k) => (k.c >= k.o ? UP : DOWN);
     if (mode === "candle") {
-      /* pixel-snapped candles: integer slot widths + crisp 1px wicks so bars
-         stay individually readable at TradingView-like densities */
-      const slot = Math.max(1, Math.round(g.rowH));
-      const bw = Math.max(1, slot - (slot >= 5 ? 2 : 1));
-      const wick = g.rowH > 18 ? 2 : 1;
+      /* continuous slot widths (no integer-slot snapping): candles grow and
+         shrink smoothly while pinching instead of jumping between widths.
+         Edges are snapped to device pixels so 1px wicks stay crisp on phones. */
+      const rowH = g.rowH;
+      const bodyW = Math.max(1, rowH - clamp(rowH * 0.24, 1, 4));
+      const bodyPx = Math.max(1 / dpr, Math.round(bodyW * dpr) / dpr);
+      const wickW = Math.max(1 / dpr, Math.min(2.5, rowH * 0.14));
+      const snap = (v) => Math.round(v * dpr) / dpr;
       for (let i = Math.max(0, i0 - 1); i <= Math.min(n - 1, i1 + 1); i++) {
         const k = candles[i];
-        const cx = Math.floor(x(i)) + 0.5;
+        const cx = snap(x(i));
         const c = col(k);
         const live = i === n - 1;
         ctx.globalAlpha = live ? 0.82 : 1;
-        ctx.strokeStyle = c; ctx.lineWidth = wick;
+        ctx.strokeStyle = c; ctx.lineWidth = wickW;
         ctx.beginPath();
         ctx.moveTo(cx, yP(k.h)); ctx.lineTo(cx, yP(k.l)); ctx.stroke();
         const yo = yP(k.o), yc = yP(k.c);
         ctx.fillStyle = c;
-        ctx.fillRect(Math.round(cx - bw / 2), Math.min(yo, yc), bw, Math.max(1, Math.abs(yc - yo)));
+        ctx.fillRect(snap(cx - bodyPx / 2), Math.min(yo, yc),
+          bodyPx, Math.max(1 / dpr, Math.abs(yc - yo)));
       }
       ctx.globalAlpha = 1;
       if (n - 1 >= i0 && n - 1 <= i1) {
@@ -649,7 +714,7 @@ const ChartX = (() => {
     /* ---------------- volume pane */
     ctx.save();
     ctx.beginPath(); ctx.rect(PAD.l, g.vol.y, plotW, g.vol.h); ctx.clip();
-    const bw = Math.max(1.5, g.rowH * 0.62);
+    const bw = Math.max(1 / dpr, g.rowH * 0.62);
     for (let i = Math.max(0, i0 - 1); i <= Math.min(n - 1, i1 + 1); i++) {
       const k = candles[i];
       const y = yV(k.v);
@@ -777,6 +842,13 @@ const ChartX = (() => {
       }
     }
 
+    /* active axis feedback while dragging a scale (TV highlights the scale) */
+    if (axisDrag) {
+      ctx.fillStyle = "rgba(255,255,255,.045)";
+      if (axisDrag.kind === "price") ctx.fillRect(PAD.l + plotW, g.main.y, PAD.r, g.main.h);
+      else ctx.fillRect(PAD.l, H - PAD.b, plotW, PAD.b);
+    }
+
     /* ---------------- last price tag */
     const yLast = clamp(yP(lastC), g.main.y + 9, g.main.y + g.main.h - 9);
     const lc = lastDirUp ? UP : DOWN;
@@ -815,8 +887,9 @@ const ChartX = (() => {
 
     /* keep the dual-layer gold glow pulsing while both overlays are visible;
        ~11 fps is smooth enough and avoids burning a phone redrawing the
-       whole canvas (and every label) at 60 fps */
-    if (!REDUCE_MOTION && !animRaf && candles.length && show.pivots && show.structure) {
+       whole canvas (and every label) at 60 fps. Skip it when zoomed out to a
+       dense wall of bars — the pulse is invisible there and costs the most. */
+    if (!REDUCE_MOTION && !animRaf && candles.length && show.pivots && show.structure && g.rowH >= 3) {
       animRaf = setTimeout(() => { animRaf = 0; if (!document.hidden) draw(); }, 90);
     }
 
@@ -859,9 +932,17 @@ const ChartX = (() => {
       ];
       if (rv != null) rows.push('<div><span>RSI 14</span>' + rv.toFixed(1) + '</div>');
       tipEl.innerHTML = rows.join("");
-      tipEl.style.left = clamp(tx, 95, W - 95) + "px";
-      tipEl.style.top = ty + "px";
-      tipEl.style.transform = ty < 190 ? "translate(-50%, 26px)" : "translate(-50%, -112%)";
+      if (touchTracking) {
+        /* tracking mode: pin the readout to the corner so the finger never
+           covers it (TradingView shows the values in the legend instead) */
+        tipEl.style.left = "10px";
+        tipEl.style.top = "8px";
+        tipEl.style.transform = "none";
+      } else {
+        tipEl.style.left = clamp(tx, 95, W - 95) + "px";
+        tipEl.style.top = ty + "px";
+        tipEl.style.transform = ty < 190 ? "translate(-50%, 26px)" : "translate(-50%, -112%)";
+      }
       tipEl.classList.add("show");
     }
   }
@@ -872,56 +953,144 @@ const ChartX = (() => {
     raf = requestAnimationFrame(() => { raf = 0; draw(); });
   }
 
-  function pointer(e) {
+  function plotWidth() { return W - PAD.l - PAD.r; }
+
+  /* bar under a plot x; null over the blank future / history margins */
+  function pointerAt(px, py) {
     if (!geom || !candles.length) return;
-    const r = cv.getBoundingClientRect();
-    const px = e.clientX - r.left, py = e.clientY - r.top;
     if (px < PAD.l || px > PAD.l + geom.plotW) { hoverI = null; schedule(); return; }
-    const i = clamp(Math.floor(view.start + (px - PAD.l) / geom.rowH), geom.i0, geom.i1);
-    hoverI = i;
+    const raw = Math.floor(view.start + (px - PAD.l) / geom.rowH);
+    if (raw < 0 || raw >= candles.length) { hoverI = null; schedule(); return; }
+    hoverI = clamp(raw, geom.i0, geom.i1);
     hoverY = clamp(py, geom.main.y, geom.main.y + geom.main.h);
     schedule();
   }
 
-  function plotWidth() { return W - PAD.l - PAD.r; }
+  function pointer(e) {
+    const r = cv.getBoundingClientRect();
+    pointerAt(e.clientX - r.left, e.clientY - r.top);
+  }
 
-  function zoomAt(px, factor) {
+  /* price axis = right rail, time axis = bottom strip, plot = everything else */
+  function zoneAt(px, py) {
+    if (px > PAD.l + plotWidth() && py >= PAD.t && py <= H - PAD.b) return "price";
+    if (py > H - PAD.b) return "time";
+    return "plot";
+  }
+
+  function zoomToCount(next, px) {
     const n = candles.length;
-    if (!n || n <= MIN_BARS) return;
+    if (!n) return;
     const vc = viewCount();
     const rowH = plotWidth() / vc;
     const pxClamped = clamp(px, PAD.l, PAD.l + plotWidth());
     const anchor = view.start + (pxClamped - PAD.l) / rowH;
-    const next = clamp(vc * factor, Math.min(MIN_BARS, n), maxViewCount());
+    next = clamp(next, Math.min(MIN_BARS, n), n);
     view.count = next;
     view.start = anchor - (pxClamped - PAD.l) / (plotWidth() / next);
-    clampView();
-    schedule();
-  }
-
-  /* magnifier-style focus zoom at a plot x: zoom in, fit the axis; at the
-     deep-zoom limit or on the price axis it jumps back to the live edge */
-  function focusZoom(px) {
-    if (!candles.length) return;
-    if (!geom || px > PAD.l + geom.plotW) { resetView(); return; }
-    if (viewCount() <= Math.min(MIN_BARS, candles.length) + 2) { resetView(); return; }
-    zoomAt(px, 1 / 1.8);
-  }
-
-  function panByPixels(dx) {
-    const vc = viewCount();
-    const rowH = plotWidth() / vc;
-    view.start -= dx / rowH;
     clampView();
     hoverI = null;
     schedule();
   }
 
+  function zoomAt(px, factor) { zoomToCount(viewCount() * factor, px); }
+
+  function panByPixels(dx) {
+    if (!candles.length) return false;
+    const rowH = plotWidth() / viewCount();
+    const before = view.start;
+    view.start -= dx / rowH;
+    clampView();
+    hoverI = null;
+    schedule();
+    return Math.abs(view.start - before) > 1e-9;
+  }
+
   function vScrollBy(dy) {
-    if (!geom) return;
+    if (!geom) return false;
     const cap = 3 * geom.main.h;
+    const before = vScrollPx;
     vScrollPx = clamp(vScrollPx + dy, -cap, cap);
     schedule();
+    return Math.abs(vScrollPx - before) > 1e-9;
+  }
+
+  /* kinetic fling: velocity sampled from the finger, exponential friction.
+     This is the single biggest "feels like TradingView" ingredient. */
+  function stopKinetic() {
+    if (kineticRaf) cancelAnimationFrame(kineticRaf);
+    kineticRaf = 0;
+    kinetic = null;
+  }
+  function startKinetic(vx, vy) {
+    if (Math.hypot(vx, vy) < 0.035) return;
+    stopKinetic();
+    kinetic = { vx: vx, vy: vy, t: performance.now() };
+    kineticRaf = requestAnimationFrame(stepKinetic);
+  }
+  function stepKinetic(now) {
+    if (!kinetic) { kineticRaf = 0; return; }
+    const dt = clamp(now - kinetic.t, 1, 48);
+    kinetic.t = now;
+    const movedX = panByPixels(kinetic.vx * dt);
+    const movedY = vScrollBy(-kinetic.vy * dt);
+    if (!movedX) kinetic.vx = 0;
+    if (!movedY) kinetic.vy = 0;
+    const decay = Math.exp(-dt / 340);
+    kinetic.vx *= decay;
+    kinetic.vy *= decay;
+    if (Math.hypot(kinetic.vx, kinetic.vy) < 0.02) { kinetic = null; kineticRaf = 0; return; }
+    kineticRaf = requestAnimationFrame(stepKinetic);
+  }
+
+  /* short eased transitions for reset / double-tap (TV resets are animated) */
+  function cancelTween() {
+    tween = null;
+    if (tweenRaf) { cancelAnimationFrame(tweenRaf); tweenRaf = 0; }
+  }
+  function animateTo(to, dur) {
+    cancelTween();
+    const from = { start: view.start, count: viewCount(), vScroll: vScrollPx, vScale: vScale };
+    tween = { t0: performance.now(), dur: dur || 260, from: from, to: to };
+    tweenRaf = requestAnimationFrame(stepTween);
+  }
+  function stepTween(now) {
+    if (!tween) { tweenRaf = 0; return; }
+    const p = clamp((now - tween.t0) / tween.dur, 0, 1);
+    const e = 1 - Math.pow(1 - p, 3);
+    view.start = tween.from.start + (tween.to.start - tween.from.start) * e;
+    view.count = tween.from.count + (tween.to.count - tween.from.count) * e;
+    vScrollPx = tween.from.vScroll + (tween.to.vScroll - tween.from.vScroll) * e;
+    vScale = tween.from.vScale + (tween.to.vScale - tween.from.vScale) * e;
+    clampView();
+    draw();
+    if (p < 1) tweenRaf = requestAnimationFrame(stepTween);
+    else { tween = null; tweenRaf = 0; }
+  }
+  function resetPriceScale() {
+    animateTo({ start: view.start, count: viewCount(), vScroll: 0, vScale: 1 }, 240);
+  }
+
+  function clearLongPress() {
+    if (longPress && longPress.timer) clearTimeout(longPress.timer);
+    longPress = null;
+  }
+  function armLongPress(px, py, id) {
+    clearLongPress();
+    const lp = { id: id, x: px, y: py, timer: null };
+    lp.timer = setTimeout(() => {
+      if (longPress !== lp) return;
+      longPress = null;
+      if (!candles.length) return;
+      touchTracking = true;              // TV "tracking mode"
+      trackingMoved = false;
+      lastTap = null;
+      pointerAt(lp.x, lp.y);
+      const canVibrate = !navigator.userActivation || navigator.userActivation.isActive;
+      if (navigator.vibrate && canVibrate) { try { navigator.vibrate(8); } catch { /* unsupported */ } }
+      schedule();
+    }, 360);
+    longPress = lp;
   }
 
   /* two-finger touch: centroid delta pans (time + price), distance ratio zooms */
@@ -930,14 +1099,13 @@ const ChartX = (() => {
     if (pts.length < 2) return;
     const cx = (pts[0].x + pts[1].x) / 2, cy = (pts[0].y + pts[1].y) / 2;
     const dist = Math.max(1, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y));
-    if (!pinch) { pinch = { cx, cy, dist }; hoverI = null; schedule(); return; }
-    const r = cv.getBoundingClientRect();
+    if (!pinch) { pinch = { cx: cx, cy: cy, dist: dist }; hoverI = null; schedule(); return; }
     const rowH = plotWidth() / viewCount();
     view.start -= (cx - pinch.cx) / rowH;   // grab-pan: horizontal = time, vertical = price
     clampView();
     vScrollBy(-(cy - pinch.cy));
-    if (Math.abs(dist - pinch.dist) > 5) zoomAt(cx - r.left, pinch.dist / dist);
-    pinch = { cx, cy, dist };
+    if (dist !== pinch.dist) zoomToCount(viewCount() * (pinch.dist / dist), cx);
+    pinch = { cx: cx, cy: cy, dist: dist };
     hoverI = null;
     schedule();
   }
@@ -953,101 +1121,276 @@ const ChartX = (() => {
     }
     wrap = cv.parentElement;
     liveEl = wrap.querySelector(".chart-live");
-    if (liveEl) liveEl.addEventListener("click", resetView);
+    if (liveEl) liveEl.addEventListener("click", () => resetView());
     const resize = () => {
+      cancelTween();
+      stopKinetic();
       const dpr = window.devicePixelRatio || 1;
-      const wasFit = candles.length > 0 && viewCount() >= maxViewCount() - 0.01;
+      const prevDefault = candles.length ? defaultViewCount() : 0;
+      const wasFit = prevDefault > 0 && Math.abs(viewCount() - prevDefault) < 0.75;
+      const wasLive = atRightEdge();
       W = wrap.clientWidth;
       H = wrap.clientHeight;
       cv.width = Math.max(1, Math.round(W * dpr));
       cv.height = Math.max(1, Math.round(H * dpr));
-      /* rotation/resize: a fitted window re-fits to the new width and stays
-         pinned to the live edge instead of leaving bars stacked */
-      if (wasFit) fitView();
+      /* rotation/resize: a fitted window re-fits to the new width; a custom
+         zoom keeps its density but stays parked on the live edge */
+      if (candles.length) {
+        if (wasFit) fitView();
+        else {
+          if (wasLive) view.start = liveStart(viewCount());
+          clampView();
+        }
+      }
       draw();
     };
     new ResizeObserver(resize).observe(wrap);
     resize();
-    cv.addEventListener("pointermove", (e) => {
-      if (e.pointerType === "touch") {
-        if (!touches.has(e.pointerId)) return;
-        touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
-        if (touches.size >= 2) touchGesture();
-        else pointer(e);
-        return;
-      }
-      if (drag) {
-        const dx = e.clientX - drag.x;
-        if (Math.abs(dx) > 2) drag.moved = true;
-        panByPixels(dx - drag.lastDx);
-        drag.lastDx = dx;
-        return;
-      }
-      pointer(e);
-    });
+
     cv.addEventListener("pointerdown", (e) => {
-      if (e.pointerType === "touch") {
-        const wasSingle = touches.size === 0;
-        touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
-        if (e.isPrimary && wasSingle) {
-          /* double-tap = focus zoom (same as dblclick), 320ms / 18px window;
-             only tracked when the previous finger fully lifted, so pinch
-             starts can never read as a double-tap */
-          const now = performance.now();
-          if (lastTap && now - lastTap.t < 320 && Math.abs(e.clientX - lastTap.x) < 18 && Math.abs(e.clientY - lastTap.y) < 18) {
-            tapZoomAt = now;
-            lastTap = null;
-            const r = cv.getBoundingClientRect();
-            focusZoom(e.clientX - r.left);
-          } else {
-            lastTap = { t: now, x: e.clientX, y: e.clientY };
-          }
-        }
-        if (touches.size === 1) pointer(e);
-        else { pinch = null; lastTap = null; hoverI = null; schedule(); }
+      cancelTween();
+      stopKinetic();
+      if (e.pointerType === "touch" || e.pointerType === "pen") {
+        if (e.cancelable) e.preventDefault();
+        const r = cv.getBoundingClientRect();
+        const p = { x: e.clientX - r.left, y: e.clientY - r.top };
+        touches.set(e.pointerId, p);
         try { cv.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
+        if (touches.size === 1) {
+          suppressPan = false;
+          if (touchTracking) trackingMoved = false;   // a fresh tap can exit tracking
+          const zone = zoneAt(p.x, p.y);
+          pan = {
+            id: e.pointerId, zone: zone,
+            startX: p.x, startY: p.y, lastX: p.x, lastY: p.y,
+            lastT: performance.now(), vx: 0, vy: 0, moved: false,
+            trackingAtDown: touchTracking,
+            scale0: vScale, count0: viewCount(), anchorX: p.x,
+          };
+          /* long press = tracking crosshair; it must not fight a pan, so it
+             is only armed on the plot and cancelled by movement */
+          if (zone === "plot" && !touchTracking) armLongPress(p.x, p.y, e.pointerId);
+        } else {
+          clearLongPress();
+          pan = null;
+          touchTracking = false;
+          hoverI = null;
+          pinch = null;
+          suppressPan = true;
+          schedule();
+        }
         return;
       }
       if (e.button !== 0) return;
-      drag = { x: e.clientX, lastDx: 0, moved: false };
-      cv.classList.add("dragging");
+      const r = cv.getBoundingClientRect();
+      const px = e.clientX - r.left, py = e.clientY - r.top;
+      const zone = zoneAt(px, py);
+      if (zone === "price") {
+        axisDrag = { kind: "price", y0: py, scale0: vScale };
+        cv.style.cursor = "ns-resize";
+      } else if (zone === "time") {
+        axisDrag = { kind: "time", x0: px, count0: viewCount(), anchorX: px };
+        cv.style.cursor = "ew-resize";
+      } else {
+        drag = { x: px, y: py, lastX: px, lastY: py, moved: false };
+        cv.classList.add("dragging");
+        cv.style.cursor = "grabbing";
+      }
       try { cv.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
-      pointer(e);
     });
-    const endPointer = (e) => {
-      if (e.pointerType === "touch") {
+
+    cv.addEventListener("pointermove", (e) => {
+      if (e.pointerType === "touch" || e.pointerType === "pen") {
+        if (!touches.has(e.pointerId)) return;
+        const r = cv.getBoundingClientRect();
+        const p = { x: e.clientX - r.left, y: e.clientY - r.top };
+        touches.set(e.pointerId, p);
+        if (touches.size >= 2) {
+          clearLongPress();
+          pan = null;
+          touchTracking = false;
+          hoverI = null;
+          touchGesture();
+          return;
+        }
+        if (suppressPan || !pan) return;
+        if (longPress && !pan.moved) { longPress.x = p.x; longPress.y = p.y; }
+        const now = performance.now();
+        if (touchTracking) {              // long-press crosshair: move the cursor only
+          trackingMoved = true;
+          pointerAt(p.x, p.y);
+          return;
+        }
+        const dx = p.x - pan.lastX, dy = p.y - pan.lastY;
+        if (!pan.moved && Math.hypot(p.x - pan.startX, p.y - pan.startY) > 8) {
+          pan.moved = true;
+          clearLongPress();
+          lastTap = null;
+        }
+        if (!pan.moved) return;
+        const dt = Math.max(1, now - pan.lastT);
+        pan.vx = 0.75 * pan.vx + 0.25 * (dx / dt);
+        pan.vy = 0.75 * pan.vy + 0.25 * (dy / dt);
+        pan.lastT = now;
+        pan.lastX = p.x; pan.lastY = p.y;
+        if (pan.zone === "price") {
+          /* drag the price scale: up stretches, down compresses (TV axis drag) */
+          vScale = clamp(pan.scale0 * Math.exp(-(p.y - pan.startY) / 180), 0.2, 6);
+          hoverI = null;
+          schedule();
+        } else if (pan.zone === "time") {
+          /* drag the time scale: right = wider bars, left = tighter bars */
+          zoomToCount(pan.count0 * Math.exp(-(p.x - pan.startX) / 220), pan.anchorX);
+        } else {
+          panByPixels(dx);
+          vScrollBy(-dy);
+        }
+        return;
+      }
+      const r = cv.getBoundingClientRect();
+      const px = e.clientX - r.left, py = e.clientY - r.top;
+      if (axisDrag) {
+        if (axisDrag.kind === "price") {
+          vScale = clamp(axisDrag.scale0 * Math.exp(-(py - axisDrag.y0) / 180), 0.2, 6);
+        } else {
+          zoomToCount(axisDrag.count0 * Math.exp(-(px - axisDrag.x0) / 220), axisDrag.anchorX);
+        }
+        hoverI = null;
+        schedule();
+        return;
+      }
+      if (drag) {
+        const dx = px - drag.lastX, dy = py - drag.lastY;
+        if (Math.hypot(px - drag.x, py - drag.y) > 2) drag.moved = true;
+        panByPixels(dx);
+        vScrollBy(-dy);
+        drag.lastX = px; drag.lastY = py;
+        return;
+      }
+      const zone = zoneAt(px, py);
+      cv.style.cursor = zone === "price" ? "ns-resize" : zone === "time" ? "ew-resize" : "crosshair";
+      pointerAt(px, py);
+    });
+
+    const finish = (e, canceled) => {
+      if (e.pointerType === "touch" || e.pointerType === "pen") {
+        const wasTracking = touchTracking;
+        const p = pan;
         touches.delete(e.pointerId);
-        if (touches.size < 2) pinch = null;
+        clearLongPress();
         try { cv.releasePointerCapture(e.pointerId); } catch { /* not captured */ }
+        if (touches.size > 0) {
+          pinch = null;
+          pan = null;
+          suppressPan = true;
+          return;
+        }
+        if (!canceled && p) {
+          if (wasTracking) {
+            /* the long-press gesture that opened tracking keeps it on release;
+               a later single tap exits, a drag moves the crosshair and stays */
+            if (p.trackingAtDown && !trackingMoved) {
+              touchTracking = false;
+              hoverI = null;
+              hoverY = null;
+              schedule();
+            }
+          } else if (!p.moved && !suppressPan) {
+            const now = performance.now();
+            if (lastTap && now - lastTap.t < 320 &&
+                Math.hypot(p.startX - lastTap.x, p.startY - lastTap.y) < 26) {
+              lastTap = null;
+              tapZoomAt = now;
+              /* double-tap resets: price scale on the right rail, chart view
+                 on the plot or the time axis (TV double-click reset) */
+              if (p.zone === "price") resetPriceScale();
+              else resetView();
+            } else {
+              lastTap = { t: now, x: p.startX, y: p.startY, zone: p.zone };
+            }
+          } else if (p.moved && !suppressPan && p.zone === "plot") {
+            /* a finger that paused before lifting should not fling */
+            const idle = performance.now() - p.lastT;
+            const damp = idle > 90 ? 0 : Math.exp(-idle / 120);
+            startKinetic(p.vx * damp, p.vy * damp);
+          }
+        }
+        if (canceled) { touchTracking = false; hoverI = null; }
+        pan = null;
+        pinch = null;
+        suppressPan = false;
+        schedule();
+        return;
+      }
+      if (axisDrag) {
+        axisDrag = null;
+        cv.style.cursor = "";
         return;
       }
       if (!drag) return;
       drag = null;
       cv.classList.remove("dragging");
+      cv.style.cursor = "";
       try { cv.releasePointerCapture(e.pointerId); } catch { /* not captured */ }
     };
-    cv.addEventListener("pointerup", endPointer);
-    cv.addEventListener("pointercancel", endPointer);
+    cv.addEventListener("pointerup", (e) => finish(e, false));
+    cv.addEventListener("pointercancel", (e) => finish(e, true));
     cv.addEventListener("pointerleave", (e) => {
-      if (!drag && e.pointerType !== "touch") { hoverI = null; schedule(); }
+      if (e.pointerType !== "touch" && !drag && !axisDrag) {
+        hoverI = null;
+        cv.style.cursor = "";
+        schedule();
+      }
     });
-    cv.addEventListener("blur", () => { hoverI = null; touches.clear(); pinch = null; schedule(); });
-    document.addEventListener("visibilitychange", () => { if (!document.hidden) schedule(); });
-    /* double-click: magnifier-style focus zoom at the pointer (x1.8 per click),
-       time-anchored on the pointed candle with the price axis auto-fitting the
-       zoomed window; on the price axis it fits, and at the deep-zoom limit too.
-       Touch double-taps are handled in pointerdown (tapZoomAt guards the
-       browser-synthesized dblclick that follows them). */
+    cv.addEventListener("contextmenu", (e) => e.preventDefault());
+    cv.addEventListener("blur", () => {
+      clearLongPress();
+      stopKinetic();
+      touches.clear();
+      pan = null; pinch = null; suppressPan = false;
+      touchTracking = false;
+      hoverI = null;
+      schedule();
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) { stopKinetic(); clearLongPress(); }
+      else schedule();
+    });
+
+    /* double-click = reset (TV: double-click the price scale for auto-scale,
+       the time axis for default spacing; on the plot we reset the whole view) */
     cv.addEventListener("dblclick", (e) => {
-      if (performance.now() - tapZoomAt < 600) return;
+      if (performance.now() - tapZoomAt < 600) return;   // synthesized after a touch double-tap
+      e.preventDefault();
+      cancelTween();
+      stopKinetic();
       const r = cv.getBoundingClientRect();
-      focusZoom(e.clientX - r.left);
+      const px = e.clientX - r.left, py = e.clientY - r.top;
+      if (zoneAt(px, py) === "price") resetPriceScale();
+      else resetView();
     });
+
     cv.addEventListener("wheel", (e) => {
       if (!candles.length) return;
       e.preventDefault();
-      /* classify per gesture burst: pinch (ctrl+wheel) or a mouse notch = zoom,
-         small continuous deltas (two-finger trackpad scroll) = pan both axes */
+      cancelTween();
+      stopKinetic();
+      const r = cv.getBoundingClientRect();
+      const px = e.clientX - r.left, py = e.clientY - r.top;
+      const zone = zoneAt(px, py);
+      const delta = clamp(e.deltaY, -400, 400);
+      /* wheel over the price scale stretches that scale; over the time scale
+         it changes bar spacing; over the plot it zooms or pans as before */
+      if (zone === "price") {
+        vScale = clamp(vScale * Math.exp(-delta * 0.002), 0.2, 6);
+        hoverI = null;
+        schedule();
+        return;
+      }
+      if (zone === "time") {
+        zoomAt(px, Math.pow(1.0018, delta));
+        return;
+      }
       const now = performance.now();
       const notch = e.deltaMode === 1 || (Math.abs(e.deltaY) >= 50 && Math.abs(e.deltaX) < 2);
       if (!wheelBurst || now - wheelBurst.t > 250) {
@@ -1057,13 +1400,13 @@ const ChartX = (() => {
         if (e.ctrlKey || e.metaKey) wheelBurst.mode = "zoom";
       }
       if (wheelBurst.mode === "zoom") {
-        const r = cv.getBoundingClientRect();
-        zoomAt(e.clientX - r.left, Math.pow(1.0018, clamp(e.deltaY, -400, 400)));
+        zoomAt(px, Math.pow(1.0018, delta));
         return;
       }
       if (e.deltaX) panByPixels(-e.deltaX);
       if (e.deltaY) vScrollBy(e.deltaY);
     }, { passive: false });
+
     cv.addEventListener("keydown", (e) => {
       if (e.key === "Escape") { resetView(); e.preventDefault(); return; }
       if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;

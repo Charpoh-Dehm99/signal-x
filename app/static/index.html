@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#000000">
 <title>SIGNAL-X · charts + observation lab</title>
-<link rel="stylesheet" href="/static/style.css?v=20261022d">
+<link rel="stylesheet" href="/static/style.css?v=20261022f">
 </head>
 <body>
 
@@ -67,6 +67,10 @@
               <b id="sym">&mdash;</b>
               <span class="mkt-badge" id="mkt">&mdash;</span>
               <span class="live" id="live-badge"><span class="dot"></span>live</span>
+              <span class="tf-count" id="tf-count" role="timer" aria-live="off" aria-label="Time until the current candle closes" title="Time until the current candle closes">
+                <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>
+                <span id="tf-count-val">--:--</span>
+              </span>
             </div>
             <div class="price-line">
               <span class="price" id="price">&mdash;</span>
@@ -107,7 +111,7 @@
       </div>
 
       <div class="chart-wrap" id="chart-wrap">
-        <canvas id="chart" tabindex="0" aria-label="Price chart with algorithm overlays; scroll or pinch to zoom, drag to pan, two-finger scroll to move both axes, double-click or double-tap to focus-zoom on a spot, Escape or double-click at max zoom to reset, left/right arrow keys to move the cursor"></canvas>
+        <canvas id="chart" tabindex="0" aria-label="Price chart with algorithm overlays; drag to pan, pinch to zoom, long-press for the crosshair and values, drag the price scale to stretch it, drag the time scale to change bar spacing, double-click or double-tap to reset, Escape returns to the live edge, left/right arrow keys move the cursor"></canvas>
         <div class="tip" id="tip"></div>
         <div class="chart-status" id="chart-status"></div>
         <button class="chart-live" id="chart-live" hidden title="Jump back to the live edge (or press Escape)">&rarr; realtime</button>
@@ -263,8 +267,8 @@
 </aside>
 
 <script src="/static/chat.js?v=20261021h"></script>
-<script src="/static/chart.js?v=20261021h"></script>
+<script src="/static/chart.js?v=20261022a"></script>
 <script src="/static/logo.js?v=20261021h"></script>
-<script src="/static/app.js?v=20261022d"></script>
+<script src="/static/app.js?v=20261022f"></script>
 </body>
 </html>

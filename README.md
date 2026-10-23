@@ -151,9 +151,16 @@ Useful environment variables:
 | Trading partner (`c`) | Optional right-hand drawer; a friendly, pattern-aware read of the loaded symbol/timeframe from Ollama Cloud `minimax-m3.1-flash` and 36 chart lenses. Observation-only; no trade instructions. |
 | Paper companion | Optional simulated account panel: open paper shorts, running P&L, recent exits and the HALT-entries button. Requires `scripts/companion.py`; never sends an order. |
 
-Chart gestures: wheel = zoom at cursor, drag = pan, double-click (or
-double-tap) = focus zoom, Escape = reset. On touch: one finger = crosshair,
-two fingers = pan/pinch.
+Chart gestures follow TradingView: wheel/pinch = zoom at the cursor or pinch
+centroid, drag = pan (with kinetic fling on touch), long-press = tracking
+crosshair with the OHLC readout pinned to the corner, single tap = exit
+tracking. Drag the right price scale to stretch/compress it, drag the bottom
+time scale to change bar spacing, and double-click or double-tap either scale
+to reset it (on the plot, double-click/tap resets the whole view). The chart
+keeps a TradingView-style right margin and lets you scroll into future
+whitespace; the `→ realtime` pill returns to the live edge, as does Escape.
+The clock badge beside the live pill counts down to the current candle close,
+resets on every timeframe boundary, and turns amber in the final 10 seconds.
 
 Keyboard shortcuts:
 
