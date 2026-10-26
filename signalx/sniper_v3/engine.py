@@ -38,6 +38,15 @@ class SniperConfig:
     divergence_ttl_bars: int = 12
     min_trigger_vol_ratio: float = 1.10
     min_trigger_score: float = 0.35
+    # The 5m break persists for this many closed bars instead of having to land
+    # on the exact bar being evaluated (docs: setup TTL = 12 5m bars).
+    trigger_lookback_bars: int = 12
+    # Reject a persisting break once price has run this far from the break close.
+    max_chase_atr: float = 0.75
+    # Legacy AND-gate: without a divergence, a sweep had to clear this quality.
+    # Off by default so setup_score decides; flip to True to restore the old rule.
+    require_divergence_for_weak_sweep: bool = False
+    weak_sweep_floor: float = 0.55
     min_setup_score: float = 0.35
     stop_buffer_atr: float = 0.25
     max_stop_atr: float = 3.0
@@ -278,7 +287,11 @@ class SniperEngine:
             pivot_k=self.config.pivot_k,
             ttl_bars=self.config.divergence_ttl_bars,
         )
-        if divergence is None and sweep.quality < 0.55:
+        if (
+            divergence is None
+            and sweep.quality < self.config.weak_sweep_floor
+            and self.config.require_divergence_for_weak_sweep
+        ):
             mark("location", "fail", f"sweep {sweep.quality:.2f}, no divergence")
             return finish(
                 failed="sweep",
@@ -313,6 +326,8 @@ class SniperEngine:
                 direction,  # type: ignore[arg-type]
                 atr_value=atr_5m,
                 pivot_k=self.config.pivot_k,
+                lookback=self.config.trigger_lookback_bars,
+                max_chase_atr=self.config.max_chase_atr,
             )
         except SniperError as exc:
             mark("trigger", "fail", "trigger unavailable")
@@ -321,6 +336,7 @@ class SniperEngine:
             trigger_bos=trigger.micro_bos,
             trigger_volume_ratio=trigger.volume_ratio,
             trigger_score=trigger.score,
+            trigger_bars_since=trigger.bars_since,
         )
         if not trigger.micro_bos:
             mark("trigger", "fail", "no fresh break")
@@ -346,7 +362,8 @@ class SniperEngine:
         mark(
             "trigger",
             "pass",
-            f"BOS {trigger.volume_ratio:.2f}x · score {trigger.score:.2f}",
+            f"BOS {trigger.volume_ratio:.2f}x · score {trigger.score:.2f}"
+            + (f" · {trigger.bars_since}b ago" if trigger.bars_since else ""),
         )
 
         funding_penalty = self.config.funding_penalty
@@ -468,6 +485,8 @@ class SniperEngine:
             reasons.append(f"div_{div_strength:.2f}")
         if trigger.delta_z is not None:
             reasons.append(f"delta_z_{trigger.delta_z:+.2f}")
+        if trigger.bars_since:
+            reasons.append(f"bos_age_{trigger.bars_since}b")
         if funding_penalty > 0:
             reasons.append(f"funding_penalty_{funding_penalty:.2f}")
         if oi_penalty > 0:

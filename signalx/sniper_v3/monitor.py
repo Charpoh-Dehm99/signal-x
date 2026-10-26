@@ -20,6 +20,7 @@ from signalx.sniper_v3.data import (
     funding_percentile,
     oi_crowding,
 )
+from signalx.sniper_v3.evallog import EvalLog
 from signalx.sniper_v3.primitives import SniperError
 from signalx.validation import ValidationError
 
@@ -31,6 +32,44 @@ SETTLE_MS = 8_000
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _eval_row(symbol: str, row: dict, diagnostics: object) -> dict:
+    """Flatten one monitor row into an append-only evaluation record."""
+    diag = row.get("diagnostics") or {}
+    metrics = diag.get("metrics") or {}
+    decision = row.get("decision") or {}
+    context = row.get("context") or {}
+    checks = [
+        {"key": c.get("key"), "state": c.get("state"), "detail": c.get("detail")}
+        for c in (diag.get("checks") or [])
+    ]
+    out: dict = {
+        "symbol": symbol,
+        "as_of_ms": row.get("as_of_ms"),
+        "evaluated_ms": row.get("evaluated_ms"),
+        "status": row.get("status"),
+        "failed_gate": diag.get("failed_gate"),
+        "reason": diag.get("reason"),
+        "direction": diag.get("direction"),
+        "last_close": row.get("last_close"),
+        "checks": checks,
+        "confidence": metrics.get("confidence"),
+        "expected_value_r": metrics.get("expected_value_r"),
+        "setup_score": metrics.get("setup_score"),
+        "rr": metrics.get("rr"),
+        "entry": decision.get("entry"),
+        "stop": decision.get("stop"),
+        "tp1": decision.get("tp1"),
+        "tp2": decision.get("tp2"),
+        "funding_rate": context.get("funding_rate"),
+        "funding_pctile": context.get("funding_pctile"),
+        "oi_crowding": context.get("oi_crowding"),
+    }
+    for key, value in metrics.items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            out.setdefault(key, value)
+    return out
 
 
 class SniperMonitor:
@@ -48,6 +87,7 @@ class SniperMonitor:
         self.results_path = Path(results_path)
         self.interval_s = max(30.0, interval_s)
         self.workers = max(1, min(workers, 8))
+        self.eval_log = EvalLog(self.results_path.parent / "evals")
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -110,7 +150,7 @@ class SniperMonitor:
                             "error": f"{exc.__class__.__name__}: {exc}",
                         }
                     last = inputs.klines_5m[-1] if inputs.klines_5m else None
-                    return symbol, {
+                    row = {
                         "symbol": symbol,
                         "status": "setup" if decision is not None else "no_setup",
                         "evaluated_ms": _now_ms(),
@@ -125,6 +165,15 @@ class SniperMonitor:
                             "oi_crowding": oi_crowding(inputs),
                         },
                     }
+                    try:
+                        self.eval_log.record(
+                            _eval_row(symbol, row, diagnostics)
+                        )
+                        self.eval_log.record_outcomes(symbol, inputs.klines_5m)
+                    except OSError:
+                        # A full disk must not stop the observation loop.
+                        pass
+                    return symbol, row
 
             rows = await asyncio.gather(*(one(symbol) for symbol in symbols))
             self._results = {symbol: row for symbol, row in rows}
@@ -153,6 +202,7 @@ class SniperMonitor:
             "symbols": self.store.symbols(),
             "results": {k: dict(v) for k, v in self._results.items()},
             "last_error": self._last_error,
+            "funnel": self.eval_log.funnel(),
         }
 
     def forget(self, symbol: str) -> None:

@@ -387,19 +387,78 @@ def trigger_view(
     atr_value: float,
     pivot_k: int = 2,
     volume_window: int = 20,
+    lookback: int = 1,
+    max_chase_atr: float | None = None,
 ) -> TriggerView:
-    """Latest closed 5m trigger features (micro BOS + displacement + participation)."""
+    """Closed 5m trigger features (micro BOS + displacement + participation).
+
+    `lookback` makes the break persist for N closed bars instead of forcing it
+    to land on the exact bar being evaluated. This is the setup TTL described in
+    docs/SNIPER_V3.md ("the trigger must occur while a setup is active"); with
+    `lookback=1` the behaviour is the original single-bar check.
+
+    `max_chase_atr` rejects a stale break once price has run more than that many
+    ATR5 away from the break bar's close, so a persisting trigger cannot become
+    an excuse to chase.
+    """
     if atr_value <= 0:
         raise SniperError("trigger ATR must be positive")
+    if lookback < 1:
+        raise SniperError("trigger lookback must be positive")
     if len(klines) < volume_window + 3:
         raise SniperError("not enough 5m bars for trigger")
-    bar = klines[-1]
-    previous_close = klines[-2].close
-    pivots = fractal_pivots(klines, pivot_k, last_index=len(klines) - 1)
-    last_high = last_swing(pivots, "H", len(klines) - 1)
-    last_low = last_swing(pivots, "L", len(klines) - 1)
-    recent_high = max(k.high for k in klines[-13:-1])
-    recent_low = min(k.low for k in klines[-13:-1])
+
+    last = len(klines) - 1
+    # Never look further back than the data allows.
+    window = max(1, min(lookback, last - max(13, volume_window) + 1))
+    idx = last
+    view = _trigger_at(
+        klines, last, direction, atr_value, pivot_k, volume_window, bars_since=0
+    )
+    if not view.micro_bos and window > 1:
+        for i in range(last - 1, last - window, -1):
+            candidate = _trigger_at(
+                klines,
+                i,
+                direction,
+                atr_value,
+                pivot_k,
+                volume_window,
+                bars_since=last - i,
+            )
+            if candidate.micro_bos:
+                idx, view = i, candidate
+                break
+
+    if view.micro_bos and max_chase_atr is not None:
+        drift = abs(klines[last].close - klines[idx].close) / atr_value
+        if drift > max_chase_atr:
+            # The break is real but stale in price terms: report the current bar
+            # as untriggered rather than recommending a chase.
+            view = _trigger_at(
+                klines, last, direction, atr_value, pivot_k, volume_window, bars_since=0
+            )
+    return view
+
+
+def _trigger_at(
+    klines: list[Kline],
+    index: int,
+    direction: str,
+    atr_value: float,
+    pivot_k: int,
+    volume_window: int,
+    *,
+    bars_since: int,
+) -> TriggerView:
+    """Trigger features as they were visible on the closed bar at `index`."""
+    bar = klines[index]
+    previous_close = klines[index - 1].close
+    pivots = fractal_pivots(klines, pivot_k, last_index=index)
+    last_high = last_swing(pivots, "H", index)
+    last_low = last_swing(pivots, "L", index)
+    recent_high = max(k.high for k in klines[index - 12:index])
+    recent_low = min(k.low for k in klines[index - 12:index])
     if direction == "long":
         level = max(recent_high, last_high.price if last_high is not None else recent_high)
         micro_bos = bar.close > level and previous_close <= level
@@ -409,12 +468,12 @@ def trigger_view(
         micro_bos = bar.close < level and previous_close >= level
         displacement = max(0.0, (bar.open - bar.close) / atr_value)
 
-    base = [k.volume for k in klines[-volume_window - 1:-1]]
+    base = [k.volume for k in klines[index - volume_window:index]]
     mean_volume = sum(base) / len(base) if base else 0.0
     volume_ratio = bar.volume / mean_volume if mean_volume > 0 else 1.0
 
     delta_series: list[float] = []
-    for k in klines[-volume_window - 1:]:
+    for k in klines[index - volume_window:index + 1]:
         if k.quote_volume <= 0:
             delta_series = []
             break
@@ -440,5 +499,6 @@ def trigger_view(
         volume_ratio=volume_ratio,
         delta_z=delta_z,
         score=_clamp(score),
-        confirmed_index=len(klines) - 1,
+        confirmed_index=index,
+        bars_since=bars_since,
     )

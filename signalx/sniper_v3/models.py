@@ -75,6 +75,11 @@ class TriggerView:
     delta_z: float | None
     score: float
     confirmed_index: int
+    # How many closed 5m bars ago the break happened. 0 = this bar. The
+    # confirmation persists for `trigger_lookback_bars`, matching the setup TTL
+    # described in docs/SNIPER_V3.md, so the 15m sweep and the 5m break no
+    # longer have to land on the exact same evaluation.
+    bars_since: int = 0
 
 
 @dataclass(frozen=True)
