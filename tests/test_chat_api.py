@@ -171,7 +171,7 @@ async def test_chat_bad_timeframe_is_400(monkeypatch):
     monkeypatch.setenv("OLLAMA_API_KEY", "api-secret")
     async with make_client() as client:
         response = await client.post(
-            "/api/chat", json={"message": "hi", "symbol": "AAAUSDT", "tf": "1d"}
+            "/api/chat", json={"message": "hi", "symbol": "AAAUSDT", "tf": "6h"}
         )
     assert response.status_code == 400
     assert "chart timeframe" in response.json()["detail"]

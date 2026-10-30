@@ -139,7 +139,7 @@ Useful environment variables:
 |---|---|
 | Search / `WATCH` | Load any Binance spot or USDT-M futures symbol (auto-detected) |
 | Futures gainers | Top 24h movers; click to load. Gold accent = top 1% of liquid perps |
-| Timeframes | `1m · 5m · 15m · 1h · 4h` |
+| Timeframes | `1m · 5m · 15m · 1h · 4h · 1D` |
 | Overlay chips | EMA 8·13·21, swing pivots, structure, BOS/CHoCH, resistance zones, AVWAP, plateau box, divergence, RSI pane — persisted in `localStorage` |
 | Observation panel | Live state badge, events, vol-z/funding/plateau donuts, layers readout (right rail) |
 | SNIPER V3 watchlist | Assign up to 10 coins in the right-rail card; the server monitor evaluates them on closed 5m bars and shows the latest setup/no-setup state. `NOTIFY` enables the bell + optional desktop alert on new LONG/SHORT transitions. Observation only. |
@@ -169,7 +169,7 @@ Keyboard shortcuts:
 | `n` | Notifications panel |
 | `b` | Full-width chart |
 | `c` | Trading partner drawer |
-| `1`–`5` | Timeframe 1m/5m/15m/1h/4h |
+| `1`–`6` | Timeframe 1m/5m/15m/1h/4h/1D |
 | `/` | Focus symbol search |
 | `Esc` | Close chat/panel / blur input / reset chart view |
 

@@ -1678,7 +1678,7 @@ function bindShortcuts() {
     if (e.key === "n" || e.key === "N") { Notify.open(); e.preventDefault(); }
     else if (e.key === "b" || e.key === "B") toggleBig();
     else if (e.key === "/") { const s = $("search"); if (s) { s.focus(); e.preventDefault(); } }
-    else if (e.key >= "1" && e.key <= "5") {
+    else if (e.key >= "1" && e.key <= "6") {
       const b = document.querySelectorAll("#tf button")[Number(e.key) - 1];
       if (b && !b.classList.contains("on")) b.click();
     }

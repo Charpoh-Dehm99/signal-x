@@ -378,9 +378,27 @@ class TestKlines:
     @pytest.mark.anyio
     async def test_chart_unsupported_tf_is_400(self):
         async with make_client() as c:
-            r = await c.get("/api/klines/AAAUSDT?tf=1d")
+            r = await c.get("/api/klines/AAAUSDT?tf=6h")
         assert r.status_code == 400
         assert "chart timeframe" in r.json()["detail"]
+
+    @pytest.mark.anyio
+    async def test_chart_daily_tf_is_supported(self, monkeypatch):
+        async def fake_detect(client, symbol):
+            return "futures"
+
+        async def fake_fetch(client, market, symbol, interval, now_ms, **kw):
+            assert interval == "1d"
+            return chart_klines(100)
+
+        monkeypatch.setattr(server, "detect_market", fake_detect)
+        monkeypatch.setattr(server, "fetch_klines", fake_fetch)
+        async with make_client() as c:
+            r = await c.get("/api/klines/AAAUSDT?tf=1d")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["tf"] == "1d"
+        assert body["step_ms"] == 86_400_000
 
     @pytest.mark.anyio
     async def test_klines_ok(self, monkeypatch):
